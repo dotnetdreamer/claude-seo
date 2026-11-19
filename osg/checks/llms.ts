@@ -3,7 +3,7 @@
 // standard, and Google Search ignores the file; Lighthouse checks it.
 
 import { charLength } from './pageChecks.ts';
-import { pySplitLines } from './py.ts';
+import { PY_DOT, PY_LINE_START, PY_NOT_SPACE, PY_SPACE, PY_SPACE_NOT_NEWLINE, pyLstrip, pySplitLines, pyStrip } from './py.ts';
 
 export interface LlmsVerdict {
   lighthouse: 'pass' | 'fail' | 'not-applicable';
@@ -11,9 +11,11 @@ export interface LlmsVerdict {
   notes: string[];
 }
 
-const H1 = /^[^\S\n]*#\s+.+/m;
-const SUMMARY = /^[^\S\n]*>\s+\S/m;
-const H2 = /^[^\S\n]*##\s+\S/m;
+// The script's patterns with re.M, in Python's terms: ^ after "\n" only, . up to "\n", its whitespace.
+const H1 = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*#${PY_SPACE}+${PY_DOT}+`);
+const SUMMARY = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*>${PY_SPACE}+${PY_NOT_SPACE}`);
+const H2 = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*##${PY_SPACE}+${PY_NOT_SPACE}`);
+const SOFT_404 = new RegExp(`^${PY_SPACE}*<(!doctype|html)`, 'i');
 
 /** The same answer as /\[.+\]\(.+\)/ in one pass per line. */
 function hasMarkdownLink(content: string): boolean {
@@ -37,10 +39,10 @@ export function lighthouseLlmsTxt(status: number | null, content: string | null)
   if (!hasMarkdownLink(text)) errors.push('contains no Markdown links');
   if (charLength(text) < 50) errors.push('shorter than 50 characters');
   const notes: string[] = [];
-  const lines = pySplitLines(text).filter((line) => line.trim());
-  if (lines.length && !lines[0].trimStart().startsWith('# ')) notes.push('llmstxt.org expects the H1 to be the first line');
+  const lines = pySplitLines(text).filter((line) => pyStrip(line));
+  if (lines.length && !pyLstrip(lines[0]).startsWith('# ')) notes.push('llmstxt.org expects the H1 to be the first line');
   if (!SUMMARY.test(text)) notes.push("no blockquote summary ('> ...') as llmstxt.org recommends");
   if (!H2.test(text)) notes.push('no H2 sections grouping the links');
-  if (/^\s*<(!doctype|html)/i.test(text)) notes.push('served HTML, not Markdown (likely a soft 404); not a Lighthouse rule');
+  if (SOFT_404.test(text)) notes.push('served HTML, not Markdown (likely a soft 404); not a Lighthouse rule');
   return { lighthouse: errors.length ? 'fail' : 'pass', errors, notes };
 }

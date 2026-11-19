@@ -28,29 +28,60 @@ ways:
 | `checks/llms.ts` | `scripts/agentic_check.py`: llms.txt by the Lighthouse rules |
 | `checks/contentQuality.ts` | `scripts/content_quality.py`: filler, AI phrasing, repetition and density |
 | `checks/metadataTemplate.ts` | `scripts/metadata_template.py`: machine-made title and description pairs |
-| `checks/html.ts`, `checks/entities.ts`, `checks/url.ts`, `checks/py.ts` | the parts of BeautifulSoup, lxml and Python the checks depend on |
+| `checks/html.ts`, `checks/libxml.ts`, `checks/entities.ts` | the tree BeautifulSoup builds with lxml: libxml2 2.14's HTML parser and its tables, and BeautifulSoup's strings |
+| `checks/py.ts`, `checks/pyUnicode.ts` | Python's string rules: its whitespace, `\w`, `\d`, `\b`, `re.I`, `strip()`, `split()`, `lower()`, `len()`, `sorted()` and `repr()`, from Python's own tables |
 | `checks/pyJson.ts` | Python's `json.loads`: what it reads (NaN too) and its error messages, for the JSON-LD check |
+| `checks/decode.ts`, `checks/codecs.ts` | `scripts/url_safety.py`'s `decode_body`: a page's bytes made text with Python's codec lookup and its one-byte codecs |
+| `checks/url.ts` | the parts of `urllib.parse` the checks use |
 
 The files use only TypeScript that Node can run as is (no enums, `.ts` in
 imports), so the tests below need no build step.
 
-`checks/entities.ts` is written by `tests/make_entities.py` from Python's copy
-of the HTML5 table. lxml 6 (libxml2 2.14) reads character references as HTML5
-does, so the port does too.
+Four files are written by scripts in `tests/`, from the Python and libxml2
+the parity tests use, and say so at the top:
+
+- `checks/entities.ts` (`make_entities.py`): the HTML5 reference table. lxml 6
+  (libxml2 2.14) reads character references as HTML5 does, so the port does too.
+- `checks/pyUnicode.ts` (`make_pyunicode.py`): Python's character tables. A
+  browser's `\s`, `\w` and `toLowerCase()` follow its own Unicode version and
+  differ from Python's (its whitespace has U+001C to U+001F and U+0085 and not
+  U+FEFF), so the port never uses them on text.
+- `checks/libxml.ts` (`make_libxml.py`, from libxml2's `HTMLparser.c`): which
+  elements are empty, which hold raw text, which close which, and how far an
+  end tag reaches. libxml2 is not an HTML5 tree builder.
+- `checks/codecs.ts` (`make_codecs.py`): Python's codec names and its 70
+  one-byte codecs.
+
+A page whose charset is a Chinese, Japanese or Korean codec is decoded the way
+a browser decodes it, which matches Python on the characters those codecs
+share and differs on the rest (Shift_JIS 0x8160 is U+301C in Python and
+U+FF5E in a browser). A page that declares `utf-7`, `unicode_escape`,
+`raw_unicode_escape`, `punycode`, `idna`, `hz`, `johab`, `iso2022_kr` or
+`undefined` is decoded as UTF-8 here.
 
 ## Proving the port still matches
 
-`tests/parity.test.ts` runs the Python scripts and the TypeScript versions on
-the same pages (`tests/fixtures/`) and fails on any difference in a finding,
-its evidence text, a fact, a robots.txt verdict, an llms.txt verdict or a
-copy score. `tests/generated.test.ts` sends both the same generated inputs:
-over 30,000 character references (every HTML5 name, numbers, stray
-ampersands) and 6,000 broken JSON-LD blocks, down to the depth where Python
-gives up.
+Every test sends the Python and the TypeScript the same input and fails on
+any difference in a finding, its evidence text, a count, a fact or a verdict:
+
+- `tests/parity.test.ts`: the pages, robots.txt files, llms.txt files, copy
+  and title pairs in `tests/fixtures/`.
+- `tests/generated.test.ts`: over 30,000 character references (every HTML5
+  name, numbers, stray ampersands), 6,000 broken JSON-LD blocks down to the
+  depth where Python gives up, Python's string rules on every code point and
+  20,000 random strings, and 8,000 made-up byte strings, Content-Type headers
+  and meta tags through `decode_body`.
+- `tests/fuzz.test.ts`: 3,000 made-up pages (set `FUZZ_PAGES` for more),
+  built from every tag and attribute a check reads and from the characters
+  Python and JavaScript read differently, and 3,000 each of robots.txt files,
+  llms.txt files, copy and title pairs (`FUZZ_TEXTS`).
+- `tests/trees.test.ts`: 4,000 made-up documents (`FUZZ_TREES`) parsed by
+  BeautifulSoup with lxml and by `html.ts`, the trees compared node by node:
+  elements, attributes and each string with its kind.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts osg/tests/generated.test.ts
+OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/*.test.ts
 ```
 
 It needs Node 22.18 or newer and the Python packages in `requirements.txt`

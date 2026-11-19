@@ -50,6 +50,7 @@ export { analyseMetadata, analyseMetadataPairs, type MetadataResult, type Metada
 export { pyRound } from './py.ts';
 export { pythonJsonError, NESTED_TOO_DEEPLY } from './pyJson.ts';
 export { decodeEntities } from './html.ts';
+export { decodeBody, decodeAs, pythonCodec, charsetFromContentType, metaCharset } from './decode.ts';
 
 /** Which Python scripts these files follow, for the app's notes and the sync skill. */
 export const PORTED_FROM = [
@@ -57,4 +58,5 @@ export const PORTED_FROM = [
   'scripts/agentic_check.py (robots.txt, llms.txt, server-rendered)',
   'scripts/content_quality.py',
   'scripts/metadata_template.py',
+  'scripts/url_safety.py (decode_body)',
 ] as const;

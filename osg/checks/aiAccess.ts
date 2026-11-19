@@ -4,6 +4,7 @@
 // "server-rendered" check. The agent list and its roles are the script's.
 
 import { parseHtml, textOf, without } from './html.ts';
+import { PY_SPACE, pyCaseBlind, pyIsSpace, pyLen, pyLower, pySplit, pyStrip } from './py.ts';
 
 export type AgentRole = 'training' | 'search' | 'user' | 'control' | 'ads';
 
@@ -58,11 +59,11 @@ export function parseRobots(text: string): ParsedRobots {
   let current: RobotsGroup | null = null;
   let lastWasAgent = false;
   for (const raw of robotsLines(text)) {
-    const line = raw.split('#', 1)[0].trim();
+    const line = pyStrip(raw.split('#', 1)[0]);
     if (!line || !line.includes(':')) continue;
     const colon = line.indexOf(':');
-    const field = line.slice(0, colon).trim().toLowerCase();
-    const value = line.slice(colon + 1).trim();
+    const field = pyLower(pyStrip(line.slice(0, colon)));
+    const value = pyStrip(line.slice(colon + 1));
     if (field === 'user-agent') {
       if (current === null || !lastWasAgent) {
         current = { agents: [], rules: [], contentSignal: [] };
@@ -87,7 +88,7 @@ const PRODUCT_TOKEN = /^[A-Za-z_-]+/;
 
 /** The lower case product token of one User-agent value: "*", a name, or "". */
 export function productToken(value: string): string {
-  const trimmed = (value || '').trim();
+  const trimmed = pyStrip(value || '');
   if (trimmed === '*') return '*';
   const match = PRODUCT_TOKEN.exec(trimmed);
   return match ? match[0].toLowerCase() : '';
@@ -105,7 +106,7 @@ export interface SelectedGroup {
 
 /** RFC 9309: every group naming the token together, else every "*" group. */
 export function selectGroup(parsed: ParsedRobots, token: string): SelectedGroup {
-  const lower = token.trim().toLowerCase();
+  const lower = pyLower(pyStrip(token));
   const named = parsed.groups.filter((group) => groupNames(group, lower));
   const chosen = named.length ? named : parsed.groups.filter((group) => groupNames(group, '*'));
   return {
@@ -142,7 +143,8 @@ export function isAllowed(rules: SelectedGroup['rules'], path = '/'): boolean {
   for (const [field, value] of rules) {
     if (field === 'disallow' && value === '') continue;
     if (patternMatches(value, path)) {
-      const length = value.length;
+      // len(): code points.
+      const length = pyLen(value);
       if (length > bestLength || (length === bestLength && field === 'allow')) {
         bestLength = length;
         allowed = field === 'allow';
@@ -226,23 +228,30 @@ export function auditRobots(status: number | null, text: string | null): RobotsA
 export function wordsWithoutJavaScript(html: string): number {
   const dropped = new Set(['script', 'style', 'noscript', 'template', 'svg']);
   const text = textOf(without(parseHtml(html), (el) => dropped.has(el.name)));
-  return text.split(/\s+/).filter(Boolean).length;
+  return pySplit(text).length;
 }
+
+// The script's patterns, with re.I as Python reads it (py.ts, pyCaseBlind).
+const SHELL_PHRASE = new RegExp(pyCaseBlind('enable javascript'), 'iu');
+const SHELL_DIV = new RegExp(pyCaseBlind('<div'), 'giu');
+const SHELL_ID = new RegExp(`${pyCaseBlind('id=')}["'](${['root', 'app', '__next', '__nuxt'].map(pyCaseBlind).join('|')})["']`, 'iu');
+const SHELL_END = new RegExp(`^${pyCaseBlind('</div>')}`, 'iu');
 
 /** Whether the raw HTML looks like an app shell that fills itself in with JavaScript. */
 export function jsShellMarker(html: string): boolean {
-  if (/enable javascript/i.test(html)) return true;
-  const divOpen = /<div/gi;
-  const shellId = /id=["'](root|app|__next|__nuxt)["']/i;
+  if (SHELL_PHRASE.test(html)) return true;
   let position = 0;
   for (;;) {
-    divOpen.lastIndex = position;
-    const div = divOpen.exec(html);
+    SHELL_DIV.lastIndex = position;
+    const div = SHELL_DIV.exec(html);
     if (!div) return false;
     const afterDiv = div.index + div[0].length;
     const close = html.indexOf('>', afterDiv);
     if (close < 0) return false;
-    if (/^\s*<\/div>/i.test(html.slice(close + 1, close + 1 + 4096)) && shellId.test(html.slice(afterDiv + 1, close))) return true;
+    // \s*</div> right after the tag, with Python's whitespace and no cap on its length.
+    let end = close + 1;
+    while (end < html.length && pyIsSpace(html[end])) end++;
+    if (SHELL_END.test(html.slice(end, end + 8)) && SHELL_ID.test(html.slice(afterDiv + 1, close))) return true;
     position = close + 1;
   }
 }

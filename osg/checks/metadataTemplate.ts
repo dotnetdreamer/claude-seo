@@ -3,7 +3,7 @@
 // call to action, the brand pasted into the description, or a description
 // that is the title again. String comparison only, no model.
 
-import { pyRepr, pyRound, WORD_CHAR } from './py.ts';
+import { PY_END, PY_SPACE, pyCompare, pyLower, pyRepr, pyRound, pySplit, pyStrip, WORD_CHAR } from './py.ts';
 
 const W = WORD_CHAR;
 const CTA_TAIL_PATTERNS = [
@@ -16,8 +16,9 @@ const CTA_TAIL_PATTERNS = [
   `(?:boost|improve|upgrade) (?:your )?(?:${W}+ ){0,3}now`,
   'sign up (?:free|now|today)',
 ];
-const CTA_TAIL = new RegExp(`(${CTA_TAIL_PATTERNS.join('|')})[.!]*\\s*$`, 'iu');
-const BRAND_SEPARATOR = /\s[|\u2013\u2014-]\s/u;
+// re.IGNORECASE as Python reads it: an "i" in these words also matches U+0131 and U+0130 (py.ts, pyCaseBlind).
+const CTA_TAIL = new RegExp(`(${CTA_TAIL_PATTERNS.map((pattern) => pattern.replace(/i/g, '[i\\u0131\\u0130]')).join('|')})[.!]*${PY_SPACE}*${PY_END}`, 'iu');
+const BRAND_SEPARATOR = new RegExp(`${PY_SPACE}[|\\u2013\\u2014-]${PY_SPACE}`, 'u');
 const NON_ALNUM = /[^a-z0-9 ]+/g;
 const MIN_TITLE_CHARS = 25;
 const ECHO_PREFIX_CHARS = 60;
@@ -52,7 +53,7 @@ function cps(text: string): string[] {
 }
 
 function normalise(text: string): string {
-  return text.toLowerCase().replace(NON_ALNUM, ' ').split(/\s+/).filter(Boolean).join(' ');
+  return pySplit(pyLower(text).replace(NON_ALNUM, ' ')).join(' ');
 }
 
 function stripChars(text: string, set: string): string {
@@ -65,7 +66,7 @@ function stripChars(text: string, set: string): string {
 }
 
 function titleCore(title: string): string {
-  return title.split(BRAND_SEPARATOR)[0].trim();
+  return pyStrip(title.split(BRAND_SEPARATOR)[0]);
 }
 
 function echoRemainder(core: string, description: string): string {
@@ -73,8 +74,8 @@ function echoRemainder(core: string, description: string): string {
 }
 
 export function analyseMetadata(title: string, description: string, url: string | null = null): MetadataResult {
-  const t = (title || '').trim();
-  const d = (description || '').trim();
+  const t = pyStrip(title || '');
+  const d = pyStrip(description || '');
   const result: MetadataResult = { url, title: t, description: d, templated: false, severity: 'none', cta_phrase: null, flags: [], signals: [] };
   if (!t || !d) {
     result.flags.push('missing-metadata');
@@ -114,7 +115,7 @@ export function analyseMetadata(title: string, description: string, url: string 
 
   const parts = t.split(BRAND_SEPARATOR);
   if (parts.length > 1) {
-    const brand = parts[parts.length - 1].trim();
+    const brand = pyStrip(parts[parts.length - 1]);
     const brandN = normalise(brand);
     const brandLength = cps(brand).length;
     if (brandLength >= BRAND_MIN_CHARS && brandLength <= BRAND_MAX_CHARS && brandN && ` ${descriptionN} `.includes(` ${brandN} `) && !d.startsWith(brand)) {
@@ -165,7 +166,7 @@ export function analyseMetadataPairs(pairs: ReadonlyArray<{ title?: string; desc
   const counts = new Map<string, number>();
   for (const page of templated) if (page.cta_phrase) counts.set(page.cta_phrase, (counts.get(page.cta_phrase) ?? 0) + 1);
   const shared: Record<string, number> = {};
-  for (const [phrase, n] of [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) shared[phrase] = n;
+  for (const [phrase, n] of [...counts.entries()].sort((a, b) => b[1] - a[1] || pyCompare(a[0], b[0]))) shared[phrase] = n;
   const siteFlags: string[] = [];
   let risk: MetadataSiteResult['site_risk'] = 'low';
   if (templated.length >= SITE_MIN_TEMPLATED_PAGES && ratio >= SITE_HIGH_RATIO) {

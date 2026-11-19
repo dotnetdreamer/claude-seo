@@ -36,11 +36,18 @@ a severity, a check id, a phrase list, the robots.txt agent list
 ## 3. Run the parity tests
 
 ```bash
-OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts osg/tests/generated.test.ts
+OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/*.test.ts
 ```
 
-If upstream raised its lxml or BeautifulSoup version, run
-`python osg/tests/make_entities.py` first in case the HTML5 table changed.
+If upstream raised its lxml, libxml2, BeautifulSoup or Python version, write
+the tables again first: `make_entities.py`, `make_pyunicode.py`,
+`make_codecs.py`, and `make_libxml.py` with the `HTMLparser.c` of the libxml2
+lxml bundles (the script says where to get it). Then run the tests with
+larger counts once, for example `FUZZ_PAGES=20000 FUZZ_TREES=20000`.
+
+In the TypeScript, never use JavaScript's own trim, `\s`, `\w`, `\d`, `\b`,
+`\p{...}`, `toLowerCase()`, `sort()` or `.length` on text where the script uses
+Python's: use `checks/py.ts`.
 A failure names the page or file and shows the difference. Change the
 matching file in `osg/checks/` until the tests pass. Keep the TypeScript
 close to the Python line by line, so the next diff is easy to follow.

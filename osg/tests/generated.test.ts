@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { parseHtml, find, findAll, rawText } from '../checks/html.ts';
 import { NAMED_REFERENCES } from '../checks/entities.ts';
 import { pythonJsonError } from '../checks/pyJson.ts';
+import { decodeBody } from '../checks/decode.ts';
+import { PY_BOUNDARY, PY_DIGIT, PY_WORD, pyIsAlnum, pyIsAlpha, pyIsSpace, pyLower, pyLstrip, pyRepr, pyRstrip, pySorted, pySplit, pyStrip } from '../checks/py.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -139,4 +141,95 @@ test("JSON-LD errors: Python's words at Python's positions, and its nesting limi
   });
   assert.deepEqual(differences.slice(0, 20), [], `${differences.length} of ${texts.length} texts differ`);
   assert.ok(py.filter((answer) => answer !== null).length > 3000, 'most of the texts should be broken');
+});
+
+test("Python's string rules: lower, strip, split, repr, \\w, \\d, \\b and sort, on every code point and on random strings", () => {
+  const random = seeded(31);
+  const texts: string[] = [];
+  // Every code point once, in blocks, so each is read in some company.
+  const block: string[] = [];
+  for (let point = 0; point <= 0x10ffff; point++) {
+    if (point >= 0xd800 && point <= 0xdfff) continue;
+    block.push(String.fromCodePoint(point));
+    if (block.length === 64) texts.push(block.splice(0).join(''));
+  }
+  if (block.length) texts.push(block.join(''));
+  // Strings around the final sigma, spaces and marks.
+  const pieces = ['\u{3A3}', '\u{3C3}', 'A', 'a', ' ', '\u{1C}', '\u{85}', '\u{FEFF}', '\u{A0}', '\u{301}', "'", '.', '\u{130}', '\u{131}', '\u{DF}', '\u{1F600}', '\u{FF13}', '\u{663}', '_', '-', '\u{2028}', '\u{200B}', '\u{2C65}', 'x', '\u{10D50}', '\u{1C89}'];
+  for (let i = 0; i < 20000; i++) texts.push(Array.from({ length: Math.floor(random() * 9) }, () => pick(random, pieces)).join(''));
+  const py: { each: any[]; sorted: string[] } = harness('py-text', { texts });
+  const differences: string[] = [];
+  const word = new RegExp(PY_WORD, 'u');
+  const digit = new RegExp(PY_DIGIT, 'u');
+  const boundary = new RegExp(PY_BOUNDARY, 'gu');
+  texts.forEach((text, index) => {
+    const list = Array.from(text);
+    const positions: number[] = [];
+    // \\b positions as Python counts them: in code points.
+    for (const match of text.matchAll(boundary)) positions.push(Array.from(text.slice(0, match.index)).length);
+    const ts = [
+      pyLower(text), pyStrip(text), pyLstrip(text), pyRstrip(text), pySplit(text), pyRepr(text),
+      list.map(pyIsAlnum), list.map(pyIsAlpha), list.map(pyIsSpace), list.map((ch) => word.test(ch)), list.map((ch) => digit.test(ch)), positions, pyStrip(text, '._- '),
+    ];
+    const names = ['lower', 'strip', 'lstrip', 'rstrip', 'split', 'repr', 'isalnum', 'isalpha', 'isspace', '\\w', '\\d', '\\b', 'strip(chars)'];
+    ts.forEach((value, at) => {
+      if (JSON.stringify(value) !== JSON.stringify(py.each[index][at])) differences.push(`${names[at]} of ${JSON.stringify(text.slice(0, 40))}`);
+    });
+  });
+  assert.deepEqual(differences.slice(0, 20), [], `${differences.length} differences`);
+  // Compared by hand: a failing deepEqual on two arrays this long spends minutes on its diff.
+  const sorted = pySorted(texts);
+  const at = sorted.findIndex((text, index) => text !== py.sorted[index]);
+  assert.ok(at < 0 && sorted.length === py.sorted.length, `sorted() differs at ${at}: ${JSON.stringify(sorted[at])} vs ${JSON.stringify(py.sorted[at])}`);
+});
+
+test("page bytes: decode_body's choice of codec and Python's codecs, on made-up bytes, headers and meta tags", () => {
+  const random = seeded(1252);
+  const byte = () => Math.floor(random() * 256);
+  const TEXT = ['a', 'Pebble ', '\u{E9}', '\u{20AC}', '\u{201C}', '\u{2026}', '\u{416}', '\u{3A3}', '\u{5D0}', '\u{E01}', '\u{1F600}', '\u{FEFF}', '\u{FFFD}', '\n', '\u{0}', '<', '>', '"'];
+  const LABELS = [
+    '', 'utf-8', 'UTF8', ' utf-8 ', 'utf-8-sig', 'windows-1252', 'cp1252', 'CP1252', 'latin1', 'latin-1', 'iso-8859-1', 'ISO_8859-1:1987', 'l1', 'iso-8859-15', 'iso8859_2', 'windows-1251',
+    'koi8-r', 'koi8_u', 'macintosh', 'mac-roman', 'cp437', 'ibm037', 'cp500', 'ascii', 'us-ascii', 'ANSI_X3.4-1968', 'utf-16', 'UTF-16LE', 'utf-16be', 'utf-32', 'utf-32le', 'utf_32_be',
+    'tis-620', 'cp874', 'cp866', 'iso-8859-8', 'bogus', 'rot13', 'base64', 'x-mac-roman', 'unicode-1-1-utf-8', 'latin_1', 'windows_1250', '8859', 'utf', 'UTF-8;', '"utf-8"', 'cp1258', 'hp-roman8',
+  ];
+  const cases: Array<{ bytes: string; content_type: string }> = [];
+  const textBytes = (encoding: string): number[] => {
+    const text = Array.from({ length: Math.floor(random() * 30) }, () => pick(random, TEXT)).join('');
+    if (encoding === 'utf-8') return Array.from(new TextEncoder().encode(text));
+    const units: number[] = [];
+    for (let i = 0; i < text.length; i++) units.push(text.charCodeAt(i));
+    if (random() < 0.2) units.splice(Math.floor(random() * (units.length + 1)), 0, 0xd800 + Math.floor(random() * 0x800));
+    const out: number[] = [];
+    for (const unit of units) out.push(...(encoding === 'utf-16le' ? [unit & 0xff, unit >> 8] : [unit >> 8, unit & 0xff]));
+    if (random() < 0.2) out.push(byte());
+    return out;
+  };
+  for (let n = 0; n < 8000; n++) {
+    const kind = pick(random, ['utf-8', 'utf-8', 'utf-16le', 'utf-16be', 'random', 'broken'] as const);
+    let body: number[] =
+      kind === 'random' ? Array.from({ length: Math.floor(random() * 80) }, byte)
+      : kind === 'broken' ? textBytes('utf-8').flatMap((b) => (random() < 0.15 ? [pick(random, [0x80, 0xbf, 0xc0, 0xc2, 0xe0, 0xed, 0xef, 0xf0, 0xf4, 0xf5, 0xff])] : [b]))
+      : textBytes(kind);
+    if (random() < 0.2) body = [...pick(random, [[0xef, 0xbb, 0xbf], [0xff, 0xfe], [0xfe, 0xff], [0xff, 0xfe, 0, 0], [0, 0, 0xfe, 0xff]]), ...body];
+    if (random() < 0.4) {
+      const label = pick(random, LABELS);
+      const meta = pick(random, [
+        `<meta charset="${label}">`, `<META CHARSET=${label}>`, `<meta charset=${label}/>`, `<meta http-equiv="Content-Type" content="text/html; charset=${label}">`,
+        `<meta content="text/html;charset=${label}" http-equiv=content-type>`, `<meta content="text/html; charset=${label}">`, `<meta property="og:image" content="https://x.example/?charset=${label}">`,
+        `<meta charset="${label}" charset="utf-8">`, `<meta\u{1C}charset=${label}>`, `<meta charset = ' ${label} '>`,
+      ]);
+      const at = random() < 0.15 ? body.length + 4100 : Math.floor(random() * (body.length + 1));
+      while (body.length < at) body.push(0x20);
+      body.splice(at, 0, ...Array.from(new TextEncoder().encode(meta)));
+    }
+    const header = random() < 0.5 ? '' : pick(random, ['text/html', 'text/html; charset=', 'text/html;charset=', 'text/html; CHARSET = ', 'text/html; charset="', 'application/xhtml+xml; charset=']) + (random() < 0.8 ? pick(random, LABELS) : '');
+    cases.push({ bytes: Buffer.from(body).toString('base64'), content_type: header });
+  }
+  const py: Array<string | { error: string }> = harness('decode', { cases });
+  const differences: string[] = [];
+  cases.forEach((item, index) => {
+    const ts = decodeBody(new Uint8Array(Buffer.from(item.bytes, 'base64')), item.content_type);
+    if (JSON.stringify(ts) !== JSON.stringify(py[index])) differences.push(`${item.content_type} ${item.bytes.slice(0, 60)}: ${JSON.stringify(ts).slice(0, 80)} vs ${JSON.stringify(py[index]).slice(0, 80)}`);
+  });
+  assert.deepEqual(differences.slice(0, 12), [], `${differences.length} of ${cases.length} cases differ`);
 });

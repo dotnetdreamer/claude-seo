@@ -1,14 +1,14 @@
 // A small, forgiving HTML reader for the checks in this folder.
 //
 // The Python scripts read pages with BeautifulSoup and lxml. This file builds
-// the same kind of tree from the same markup, so a check written against it
-// finds what the script finds, in a browser, in Node and in a desktop app
-// alike, with no library. It is not a full HTML5 parser: it keeps the rules
-// that change what a check sees (raw text in script and style, void elements,
-// the implied head and body, a new <p> or <li> closing the open one) and
-// skips the rest (the adoption agency, foster parenting in tables).
+// the same tree from the same markup, so a check written against it finds
+// what the script finds, in a browser, in Node and in a desktop app alike,
+// with no library: it follows libxml2's HTML parser (below) and the way
+// BeautifulSoup turns its calls into strings.
 
 import { NAMED_REFERENCES } from './entities.ts';
+import { DATA_MODES, DEFAULT_END_PRIORITY, EMPTY_ELEMENTS, END_PRIORITY, START_CLOSES } from './libxml.ts';
+import { pySplit, pyStrip } from './py.ts';
 
 export interface HtmlElement {
   readonly kind: 'element';
@@ -24,39 +24,16 @@ export interface HtmlText {
   readonly kind: 'text';
   readonly value: string;
   /**
-   * What kind of string this is, as BeautifulSoup sees it: text inside
-   * script, style and template is left out of an element's text unless that
-   * element is the script, style or template itself.
+   * What kind of string this is, as BeautifulSoup sees it: a string inside
+   * a script, style, template, rt or rp element takes that kind (the
+   * innermost one), and an element's text holds only strings of its own
+   * kind, plain text for every other element.
    */
-  readonly flavour: 'text' | 'script' | 'style' | 'template';
+  readonly flavour: 'text' | 'script' | 'style' | 'template' | 'rt' | 'rp';
   parent: HtmlElement | null;
 }
 
 export type HtmlNode = HtmlElement | HtmlText;
-
-const VOID = new Set([
-  'area', 'base', 'basefont', 'bgsound', 'br', 'col', 'embed', 'frame', 'hr', 'img', 'input',
-  'keygen', 'link', 'meta', 'param', 'source', 'track', 'wbr',
-]);
-
-/** Elements whose content is text up to their own end tag. */
-const RAW_TEXT = new Set(['script', 'style', 'xmp', 'iframe', 'noembed', 'noframes']);
-/** Like RAW_TEXT, but character references are decoded. */
-const RCDATA = new Set(['title', 'textarea']);
-
-const HEAD_ONLY = new Set(['base', 'basefont', 'bgsound', 'link', 'meta', 'title', 'style', 'script', 'noscript', 'template']);
-
-/** A start tag of one of these closes an open <p>. */
-const CLOSES_P = new Set([
-  'address', 'article', 'aside', 'blockquote', 'center', 'details', 'dialog', 'dir', 'div', 'dl',
-  'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header',
-  'hgroup', 'hr', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'p', 'plaintext', 'pre', 'section',
-  'summary', 'table', 'ul', 'dd', 'dt', 'xmp',
-]);
-
-/** Where a search for an open element to close stops. */
-const SCOPE_BOUNDARY = new Set(['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template', 'svg', 'math']);
-const HEADINGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
 
 function element(name: string, attrs: Record<string, string>, parent: HtmlElement | null): HtmlElement {
   return { kind: 'element', name, attrs, children: [], parent };
@@ -152,343 +129,394 @@ export function decodeEntities(text: string, inAttribute = false): string {
   return out + text.slice(from);
 }
 
-// --- Tokens -------------------------------------------------------------
+// --- Reading a page: libxml2's HTML parser, as lxml feeds BeautifulSoup -----
+//
+// page_checks.py reads a page with BeautifulSoup(html, "lxml"): libxml2
+// 2.14's push parser reads it and calls BeautifulSoup back for every element
+// it opens or closes and every run of text, and BeautifulSoup builds its tree
+// from those calls. libxml2 is not an HTML5 tree builder. It opens and closes
+// elements by three tables (libxml.ts) and a few rules of its own
+// (htmlCheckImplied, htmlAutoClose, htmlAutoCloseOnClose, htmlParseStartTag,
+// htmlParseEndTag, htmlCharDataSAXCallback in HTMLparser.c), and those are
+// what this follows, step for step. osg/tests/trees.test.ts compares the
+// trees on thousands of made-up documents.
 
-type Token =
-  | { type: 'start'; name: string; attrs: Record<string, string>; selfClosing: boolean }
-  | { type: 'end'; name: string }
-  | { type: 'text'; value: string; flavour: HtmlText['flavour'] };
+/** HTML whitespace, as libxml2's IS_WS_HTML has it (no vertical tab). */
+const WS = /[\t\n\f\r ]/;
+const ASCII_LETTER = /[A-Za-z]/;
+/** Whitespace BeautifulSoup folds into one character when a string holds nothing else. */
+const ASCII_SPACES = /^[\x20\x0a\x09\x0c\x0d]*$/;
+/** Strings inside these take their kind (BeautifulSoup's string containers). */
+const CONTAINERS: Readonly<Record<string, HtmlText['flavour']>> = { script: 'script', style: 'style', template: 'template', rt: 'rt', rp: 'rp' };
+/** Elements whose whitespace BeautifulSoup keeps as it is. */
+const PRESERVE_WHITESPACE = new Set(['pre', 'textarea']);
+/** Elements htmlCheckImplied puts in an implied <head>. */
+const HEAD_ELEMENTS = new Set(['script', 'style', 'meta', 'link', 'title', 'base']);
+/** htmlnamePush's ctxt->html: an <head> seen, a <body> seen. */
+const INSERT_IN_HEAD = 3;
+const INSERT_IN_BODY = 10;
 
-const NAME_START = /[A-Za-z]/;
-const SPACE = /[\t\n\f\r ]/;
-
-function readAttributes(source: string, from: number): { attrs: Record<string, string>; end: number; selfClosing: boolean } {
-  const attrs: Record<string, string> = {};
-  let i = from;
-  let selfClosing = false;
-  const n = source.length;
-  while (i < n) {
-    while (i < n && SPACE.test(source[i])) i++;
-    if (i >= n) break;
-    const ch = source[i];
-    if (ch === '>') {
-      return { attrs, end: i + 1, selfClosing };
-    }
-    if (ch === '/') {
-      selfClosing = source[i + 1] === '>';
-      i++;
-      continue;
-    }
-    selfClosing = false;
-    let nameEnd = i + 1;
-    while (nameEnd < n && !SPACE.test(source[nameEnd]) && source[nameEnd] !== '/' && source[nameEnd] !== '>' && source[nameEnd] !== '=') nameEnd++;
-    const name = source.slice(i, nameEnd).toLowerCase();
-    i = nameEnd;
-    while (i < n && SPACE.test(source[i])) i++;
-    let value = '';
-    if (source[i] === '=') {
-      i++;
-      while (i < n && SPACE.test(source[i])) i++;
-      const quote = source[i];
-      if (quote === '"' || quote === "'") {
-        const close = source.indexOf(quote, i + 1);
-        const stop = close < 0 ? n : close;
-        value = source.slice(i + 1, stop);
-        i = close < 0 ? n : close + 1;
-      } else {
-        let valueEnd = i;
-        while (valueEnd < n && !SPACE.test(source[valueEnd]) && source[valueEnd] !== '>') valueEnd++;
-        value = source.slice(i, valueEnd);
-        i = valueEnd;
-      }
-    }
-    if (name && !(name in attrs)) attrs[name] = decodeEntities(value, true);
-  }
-  return { attrs, end: n, selfClosing };
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
 }
 
-function* tokens(source: string): Generator<Token> {
+const endPriority = (name: string): number => END_PRIORITY[name] ?? DEFAULT_END_PRIORITY;
+
+/**
+ * Read a page into a tree, the tree BeautifulSoup builds with lxml. The
+ * result is the document; it holds the <html> element when the page has any
+ * content at all, with the <head> and <body> libxml2 makes up when the page
+ * leaves them out.
+ */
+export function parseHtml(markup: string): HtmlElement {
+  // BeautifulSoup drops one byte order mark at the start, and libxml2 the
+  // next one when it detects the encoding. Then HTML5's first step, which
+  // libxml2 takes for the whole page: every CR or CR LF becomes LF, and NUL
+  // becomes U+FFFD. A reference such as &#13; still stands for a CR: it is read later.
+  let source = markup.startsWith('\u{FEFF}') ? markup.slice(1) : markup;
+  if (source.startsWith('\u{FEFF}')) source = source.slice(1);
+  source = source.replace(/\r\n?/g, '\n').replace(/\0/g, '\u{FFFD}');
   const n = source.length;
-  let i = 0;
-  let textStart = 0;
-  const flushText = function* (end: number): Generator<Token> {
-    if (end > textStart) yield { type: 'text', value: decodeEntities(source.slice(textStart, end)), flavour: 'text' };
+
+  const doc = element('#document', {}, null);
+  /** libxml2's name stack, holding the elements themselves. */
+  const open: HtmlElement[] = [];
+  let level = 0;
+  let depth = 0;
+  let state: 'misc' | 'prolog' | 'content' = 'misc';
+  // BeautifulSoup gathers text until the next element, comment or doctype.
+  let pending = '';
+
+  const top = (): HtmlElement | null => open[open.length - 1] ?? null;
+  const parent = (): HtmlElement => top() ?? doc;
+  const flavourHere = (): HtmlText['flavour'] => {
+    for (let index = open.length - 1; index >= 0; index--) {
+      const kind = CONTAINERS[open[index].name];
+      if (kind) return kind;
+    }
+    return 'text';
   };
-  while (i < n) {
-    const lt = source.indexOf('<', i);
-    if (lt < 0) break;
-    const next = source[lt + 1];
-    if (next === '!') {
-      yield* flushText(lt);
-      if (source.startsWith('<!--', lt)) {
-        const close = source.indexOf('-->', lt + 4);
-        i = close < 0 ? n : close + 3;
-      } else {
-        const close = source.indexOf('>', lt + 2);
-        i = close < 0 ? n : close + 1;
+  /** BeautifulSoup's endData: the gathered text becomes one string. */
+  const endData = (): void => {
+    if (!pending) return;
+    let value = pending;
+    pending = '';
+    if (!open.some((el) => PRESERVE_WHITESPACE.has(el.name)) && ASCII_SPACES.test(value)) value = value.includes('\n') ? '\n' : ' ';
+    append(parent(), { kind: 'text', value, flavour: flavourHere(), parent: null });
+  };
+  const characters = (text: string): void => {
+    pending += text;
+  };
+  const push = (name: string, attrs: Record<string, string>): void => {
+    endData();
+    if (level < INSERT_IN_HEAD && name === 'head') level = INSERT_IN_HEAD;
+    if (level < INSERT_IN_BODY && name === 'body') level = INSERT_IN_BODY;
+    const el = element(name, attrs, null);
+    append(parent(), el);
+    open.push(el);
+  };
+  const pop = (): void => {
+    endData();
+    open.pop();
+  };
+
+  /** htmlAutoClose: a new tag closes the open elements the table says it closes. */
+  const autoClose = (name: string): void => {
+    const closes = START_CLOSES[name];
+    while (closes && top() && closes.has((top() as HtmlElement).name)) pop();
+  };
+  /** htmlCheckImplied: the <html>, <head> or <body> a new tag needs. */
+  const checkImplied = (name: string): void => {
+    if (name === 'html') return;
+    if (open.length === 0) push('html', {});
+    if (name === 'body' || name === 'head') return;
+    if (open.length <= 1 && HEAD_ELEMENTS.has(name)) {
+      if (level >= INSERT_IN_HEAD) return;
+      push('head', {});
+    } else if (name !== 'noframes' && name !== 'frame' && name !== 'frameset') {
+      if (level >= INSERT_IN_BODY) return;
+      if (open.some((el) => el.name === 'body' || el.name === 'head')) return;
+      push('body', {});
+    }
+  };
+  /** htmlStartCharData: text that isn't space needs a body. */
+  const startCharData = (): void => {
+    if (top()?.name === 'head') autoClose('p');
+    checkImplied('p');
+  };
+  /** htmlCharDataSAXCallback: space in <html> or <head> stays there, the rest opens the body. */
+  const text = (value: string): void => {
+    if (!value) return;
+    const name = top()?.name;
+    if (name === undefined || name === 'html' || name === 'head') {
+      let i = 0;
+      while (i < value.length && WS.test(value[i])) i++;
+      if (i > 0) characters(value.slice(0, i));
+      if (i === value.length) return;
+      value = value.slice(i);
+      startCharData();
+    }
+    characters(value);
+  };
+  /** A comment or a doctype: BeautifulSoup keeps it as its own node, so the text around it is two strings. */
+  const boundary = (): void => endData();
+
+  /**
+   * The first half of htmlParseStartTag, which happens before the tag's
+   * attributes are read, so a tag the page ends inside has done it too.
+   * True when the tag is discarded: an <html> inside the page, a <head>
+   * anywhere but first, a second <body>.
+   */
+  const beginStartTag = (name: string): boolean => {
+    autoClose(name);
+    checkImplied(name);
+    let discard = false;
+    if (open.length > 0 && name === 'html') {
+      discard = true;
+      depth++;
+    }
+    if (open.length !== 1 && name === 'head') {
+      discard = true;
+      depth++;
+    }
+    if (name === 'body') {
+      for (const el of open) {
+        if (el.name === 'body') {
+          discard = true;
+          depth++;
+        }
       }
-      textStart = i;
+    }
+    return discard;
+  };
+
+  /** The rest of htmlParseStartTag, then htmlParseElementInternal. Returns the data mode the element's text is read in. */
+  const finishStartTag = (name: string, attrs: Record<string, string>, selfClosing: boolean, discard: boolean): string | null => {
+    if (!discard) push(name, attrs);
+    const current = top();
+    if (!current) return null;
+    // "<x/>" closes whatever element is open now, like an empty one.
+    if (selfClosing || EMPTY_ELEMENTS.has(current.name)) {
+      pop();
+      return null;
+    }
+    return DATA_MODES[current.name] ?? null;
+  };
+
+  /** htmlParseEndTag. */
+  const endTag = (name: string): void => {
+    if (depth > 0 && (name === 'html' || name === 'body' || name === 'head')) {
+      depth--;
+      return;
+    }
+    let index = open.length - 1;
+    while (index >= 0 && open[index].name !== name) index--;
+    if (index < 0) return;
+    // htmlAutoCloseOnClose: an end tag can't reach past an element of higher priority.
+    const priority = endPriority(name);
+    for (let i = open.length - 1; i >= 0; i--) {
+      if (open[i].name === name) break;
+      if (endPriority(open[i].name) > priority) return;
+    }
+    while (top() && (top() as HtmlElement).name !== name) pop();
+    if (top()?.name === name) pop();
+  };
+
+  /** An attribute name and value (htmlParseAttribute), the value's references read. */
+  const readAttribute = (at: number): { name: string; value: string | null; end: number } => {
+    let i = at + 1;
+    while (i < n && source[i] !== '/' && source[i] !== '>' && source[i] !== '=' && !WS.test(source[i])) i++;
+    const name = asciiLower(source.slice(at, i));
+    while (i < n && WS.test(source[i])) i++;
+    if (source[i] !== '=') return { name, value: null, end: i };
+    i++;
+    while (i < n && WS.test(source[i])) i++;
+    const quote = source[i];
+    let value: string;
+    if (quote === '"' || quote === "'") {
+      const close = source.indexOf(quote, i + 1);
+      const stop = close < 0 ? n : close;
+      value = source.slice(i + 1, stop);
+      i = close < 0 ? n : close + 1;
+    } else {
+      let stop = i;
+      while (stop < n && source[stop] !== '>' && !WS.test(source[stop])) stop++;
+      value = source.slice(i, stop);
+      i = stop;
+    }
+    return { name, value: decodeEntities(value, true), end: i };
+  };
+
+  /** The attributes of a tag from `at` to its ">" or "/>"; null when the page ends first (the tag is dropped). */
+  const readTag = (at: number): { attrs: Record<string, string>; end: number; selfClosing: boolean } | null => {
+    // No prototype: an attribute may be called "constructor" or "__proto__".
+    const attrs: Record<string, string> = Object.create(null);
+    let i = at;
+    while (i < n && WS.test(source[i])) i++;
+    while (i < n && source[i] !== '>' && !(source[i] === '/' && source[i + 1] === '>')) {
+      if (source[i] === '/') {
+        i++;
+        while (i < n && WS.test(source[i])) i++;
+        continue;
+      }
+      const attribute = readAttribute(i);
+      // The first copy of a repeated attribute wins.
+      if (!(attribute.name in attrs)) attrs[attribute.name] = attribute.value ?? '';
+      i = attribute.end;
+      while (i < n && WS.test(source[i])) i++;
+    }
+    if (i >= n) return null;
+    if (source[i] === '>') return { attrs, end: i + 1, selfClosing: false };
+    return { attrs, end: i + 2, selfClosing: true };
+  };
+
+  /** The text of a raw text element up to its end tag (htmlParseCharData in a data mode). */
+  const rawText = (from: number, mode: string, name: string): number => {
+    if (mode === 'plaintext') {
+      text(source.slice(from));
+      return n;
+    }
+    let escape: 0 | 1 | 2 = 0;
+    let i = from;
+    while (i < n) {
+      const ch = source[i];
+      if (ch === '<') {
+        let j = i + 1;
+        if (mode === 'script' && escape === 0 && source[j] === '!') {
+          if (source.startsWith('--', j + 1)) escape = 1;
+        } else {
+          const solidus = source[j] === '/';
+          if (solidus) j++;
+          if (solidus || escape === 1) {
+            let k = 0;
+            // (byte | 0x20) as libxml2 compares: ASCII case doesn't matter.
+            while (k < name.length && j < n && (source.charCodeAt(j) | 0x20) === name.charCodeAt(k)) {
+              k++;
+              j++;
+            }
+            if (k === name.length && j < n && (source[j] === '>' || source[j] === '/' || WS.test(source[j]))) {
+              if (escape === 1 && !solidus) escape = 2;
+              else if (escape === 2) escape = 1;
+              else break;
+            }
+          }
+        }
+      } else if (ch === '-' && escape !== 0 && source.startsWith('->', i + 1)) {
+        escape = 0;
+      }
+      i++;
+    }
+    const raw = source.slice(from, i);
+    if (raw) text(mode === 'rcdata' ? decodeEntities(raw) : raw);
+    return i;
+  };
+
+  let i = 0;
+  while (i < n) {
+    if (state !== 'content') {
+      while (i < n && WS.test(source[i])) i++;
+      if (i >= n) break;
+    }
+    if (source[i] !== '<') {
+      state = 'content';
+      let end = source.indexOf('<', i);
+      if (end < 0) end = n;
+      text(decodeEntities(source.slice(i, end)));
+      i = end;
+      continue;
+    }
+    const next = source[i + 1];
+    if (next === '!') {
+      if (source.startsWith('--', i + 2)) {
+        // A comment (htmlParseComment): "<!-->" and "<!--->" are empty, otherwise it ends at "-->" or "--!>".
+        let end: number;
+        if (source[i + 4] === '>') end = i + 5;
+        else if (source.startsWith('->', i + 4)) end = i + 6;
+        else {
+          const a = source.indexOf('-->', i + 4);
+          const b = source.indexOf('--!>', i + 4);
+          end = a < 0 && b < 0 ? n : b < 0 || (a >= 0 && a < b) ? a + 3 : b + 4;
+        }
+        boundary();
+        i = end;
+        continue;
+      }
+      if (/^doctype/i.test(source.slice(i + 2, i + 9))) {
+        const close = source.indexOf('>', i + 9);
+        boundary();
+        i = close < 0 ? n : close + 1;
+        state = state === 'misc' ? 'prolog' : 'content';
+        continue;
+      }
+      // A bogus comment, to the next ">".
+      state = 'content';
+      const close = source.indexOf('>', i + 2);
+      boundary();
+      i = close < 0 ? n : close + 1;
       continue;
     }
     if (next === '?') {
-      yield* flushText(lt);
-      const close = source.indexOf('>', lt + 2);
+      const close = source.indexOf('>', i + 1);
+      boundary();
       i = close < 0 ? n : close + 1;
-      textStart = i;
       continue;
     }
     if (next === '/') {
-      const nameStart = lt + 2;
-      if (!NAME_START.test(source[nameStart] ?? '')) {
-        i = lt + 1;
-        continue;
-      }
-      yield* flushText(lt);
-      let nameEnd = nameStart;
-      while (nameEnd < n && !SPACE.test(source[nameEnd]) && source[nameEnd] !== '/' && source[nameEnd] !== '>') nameEnd++;
-      const close = source.indexOf('>', nameEnd);
-      yield { type: 'end', name: source.slice(nameStart, nameEnd).toLowerCase() };
-      i = close < 0 ? n : close + 1;
-      textStart = i;
-      continue;
-    }
-    if (!NAME_START.test(next ?? '')) {
-      i = lt + 1;
-      continue;
-    }
-    yield* flushText(lt);
-    let nameEnd = lt + 1;
-    while (nameEnd < n && !SPACE.test(source[nameEnd]) && source[nameEnd] !== '/' && source[nameEnd] !== '>') nameEnd++;
-    const name = source.slice(lt + 1, nameEnd).toLowerCase();
-    const { attrs, end, selfClosing } = readAttributes(source, nameEnd);
-    yield { type: 'start', name, attrs, selfClosing };
-    i = end;
-    textStart = i;
-    if (RAW_TEXT.has(name) || RCDATA.has(name)) {
-      const closer = new RegExp(`</${name}(?=[\\t\\n\\f\\r />])`, 'i');
-      closer.lastIndex = 0;
-      const rest = source.slice(i);
-      const match = closer.exec(rest);
-      const stop = match ? i + match.index : n;
-      if (stop > i) {
-        const raw = source.slice(i, stop);
-        const flavour = name === 'script' ? 'script' : name === 'style' ? 'style' : 'text';
-        yield { type: 'text', value: RCDATA.has(name) ? decodeEntities(raw) : raw, flavour };
-      }
-      if (match) {
-        const close = source.indexOf('>', stop + 2);
-        yield { type: 'end', name };
-        i = close < 0 ? n : close + 1;
-      } else {
+      state = 'content';
+      if (i + 2 >= n) {
+        startCharData();
+        characters('</');
         i = n;
+        continue;
       }
-      textStart = i;
+      if (source[i + 2] === '>') {
+        i += 3;
+        continue;
+      }
+      if (!ASCII_LETTER.test(source[i + 2])) {
+        const close = source.indexOf('>', i + 2);
+        boundary();
+        i = close < 0 ? n : close + 1;
+        continue;
+      }
+      let nameEnd = i + 3;
+      while (nameEnd < n && source[nameEnd] !== '/' && source[nameEnd] !== '>' && !WS.test(source[nameEnd])) nameEnd++;
+      const name = asciiLower(source.slice(i + 2, nameEnd));
+      const tag = readTag(nameEnd);
+      if (!tag) {
+        i = n;
+        continue;
+      }
+      i = tag.end;
+      endTag(name);
+      continue;
     }
+    if (next !== undefined && ASCII_LETTER.test(next)) {
+      state = 'content';
+      let nameEnd = i + 2;
+      while (nameEnd < n && source[nameEnd] !== '/' && source[nameEnd] !== '>' && !WS.test(source[nameEnd])) nameEnd++;
+      const name = asciiLower(source.slice(i + 1, nameEnd));
+      const discard = beginStartTag(name);
+      const tag = readTag(nameEnd);
+      if (!tag) {
+        // The page ends inside the tag: libxml2 drops it.
+        i = n;
+        continue;
+      }
+      i = tag.end;
+      const mode = finishStartTag(name, tag.attrs, tag.selfClosing, discard);
+      if (mode) i = rawText(i, mode, (top() as HtmlElement).name);
+      continue;
+    }
+    // A "<" that starts nothing is text.
+    state = 'content';
+    startCharData();
+    characters('<');
+    i++;
   }
-  yield* flushText(n);
-}
-
-// --- Tree ---------------------------------------------------------------
-
-/**
- * Read a page into a tree. The result is the document; its element children
- * hold the <html> element when the page has any content at all, with <head>
- * and <body> made up the way browsers make them when the page leaves them out.
- */
-export function parseHtml(source: string): HtmlElement {
-  const doc = element('#document', {}, null);
-  let html: HtmlElement | null = null;
-  let head: HtmlElement | null = null;
-  let body: HtmlElement | null = null;
-  let headClosed = false;
-  const stack: HtmlElement[] = [];
-  let templateDepth = 0;
-
-  const ensureHtml = (attrs?: Record<string, string>): HtmlElement => {
-    if (!html) {
-      html = element('html', { ...(attrs ?? {}) }, null);
-      append(doc, html);
-      stack.length = 0;
-      stack.push(html);
-    } else if (attrs) {
-      for (const [key, value] of Object.entries(attrs)) if (!(key in html.attrs)) html.attrs[key] = value;
-    }
-    return html;
-  };
-  const ensureHead = (attrs?: Record<string, string>): HtmlElement => {
-    const root = ensureHtml();
-    if (!head) {
-      head = element('head', { ...(attrs ?? {}) }, null);
-      append(root, head);
-    }
-    return head;
-  };
-  const ensureBody = (attrs?: Record<string, string>): HtmlElement => {
-    const root = ensureHtml();
-    if (!body) {
-      body = element('body', { ...(attrs ?? {}) }, null);
-      append(root, body);
-      headClosed = true;
-      stack.length = 0;
-      stack.push(root, body);
-    } else if (attrs) {
-      for (const [key, value] of Object.entries(attrs)) if (!(key in body.attrs)) body.attrs[key] = value;
-    }
-    return body;
-  };
-  const current = (): HtmlElement => stack[stack.length - 1];
-  const inForeign = (): boolean => stack.some((el) => el.name === 'svg' || el.name === 'math');
-
-  /** Index of the nearest open element named `name`, searching down to a scope boundary. */
-  const openInScope = (name: string, extraBoundary?: ReadonlySet<string>): number => {
-    for (let index = stack.length - 1; index >= 0; index--) {
-      const el = stack[index];
-      if (el.name === name) return index;
-      if (SCOPE_BOUNDARY.has(el.name) || extraBoundary?.has(el.name) || el.name === 'body') return -1;
-    }
-    return -1;
-  };
-  const popTo = (index: number): void => {
-    while (stack.length > index) {
-      const el = stack.pop();
-      if (el?.name === 'template') templateDepth = Math.max(0, templateDepth - 1);
-      if (el === head) headClosed = true;
-    }
-  };
-
-  const closeImplied = (name: string): void => {
-    if (CLOSES_P.has(name) || name === 'p') {
-      const p = openInScope('p', new Set(['button']));
-      if (p >= 0) popTo(p);
-    }
-    if (HEADINGS.has(name) && HEADINGS.has(current().name)) popTo(stack.length - 1);
-    if (name === 'li') {
-      const li = openInScope('li', new Set(['ol', 'ul']));
-      if (li >= 0) popTo(li);
-    }
-    if (name === 'dd' || name === 'dt') {
-      for (const other of ['dd', 'dt']) {
-        const open = openInScope(other, new Set(['dl']));
-        if (open >= 0) popTo(open);
-      }
-    }
-    if (name === 'option' && current().name === 'option') popTo(stack.length - 1);
-    if (name === 'optgroup') {
-      if (current().name === 'option') popTo(stack.length - 1);
-      if (current().name === 'optgroup') popTo(stack.length - 1);
-    }
-    if (name === 'tr') {
-      const tr = openInScope('tr', new Set(['tbody', 'thead', 'tfoot']));
-      if (tr >= 0) popTo(tr);
-    }
-    if (name === 'td' || name === 'th') {
-      for (const cell of ['td', 'th']) {
-        for (let index = stack.length - 1; index >= 0; index--) {
-          const el = stack[index];
-          if (el.name === cell) {
-            popTo(index);
-            break;
-          }
-          if (el.name === 'tr' || el.name === 'table') break;
-        }
-      }
-    }
-    if (name === 'thead' || name === 'tbody' || name === 'tfoot') {
-      for (const section of ['thead', 'tbody', 'tfoot']) {
-        const open = openInScope(section);
-        if (open >= 0) popTo(open);
-      }
-    }
-    if (name === 'a' || name === 'button' || name === 'select' || name === 'form' || name === 'nobr') {
-      const open = openInScope(name);
-      if (open >= 0) popTo(open);
-    }
-  };
-
-  // HTML5's first step, which libxml2 takes for the whole page, script and
-  // comments included: every CR or CR LF becomes LF, and NUL becomes U+FFFD.
-  // A reference such as &#13; still stands for a CR: it is read later.
-  for (const token of tokens(source.replace(/\r\n?/g, '\n').replace(/\0/g, '\u{FFFD}'))) {
-    if (token.type === 'text') {
-      const blank = !/[^\t\n\f\r ]/.test(token.value);
-      if (!body && current() !== undefined && current() !== html && current() !== head && stack.length > 0 && current().name !== 'html') {
-        // Inside an element of the head (a <title>, a <script>): keep the text there.
-        append(current(), { kind: 'text', value: token.value, flavour: templateDepth > 0 ? 'template' : token.flavour, parent: null });
-        continue;
-      }
-      if (!body) {
-        if (blank) continue;
-        ensureBody();
-      }
-      append(current(), { kind: 'text', value: token.value, flavour: templateDepth > 0 ? 'template' : token.flavour, parent: null });
-      continue;
-    }
-
-    if (token.type === 'start') {
-      const { name, attrs } = token;
-      if (name === 'html') {
-        ensureHtml(attrs);
-        continue;
-      }
-      if (name === 'head') {
-        if (!body && !head) {
-          const h = ensureHead(attrs);
-          stack.length = 0;
-          stack.push(html as unknown as HtmlElement, h);
-          headClosed = false;
-        }
-        continue;
-      }
-      if (name === 'body') {
-        ensureBody(attrs);
-        continue;
-      }
-      if (!body && HEAD_ONLY.has(name)) {
-        const parentEl = current() && current() !== html && stack.length > 1 ? current() : ensureHead();
-        const target = headClosed && parentEl === html ? ensureHead() : parentEl;
-        const el = element(name, attrs, null);
-        append(target, el);
-        if (!VOID.has(name)) {
-          if (target === head && current() !== head) stack.push(head as unknown as HtmlElement);
-          stack.push(el);
-          if (name === 'template') templateDepth++;
-        }
-        continue;
-      }
-      if (!body) {
-        if (head && current() === head) popTo(stack.length - 1);
-        ensureBody();
-      }
-      if (!inForeign()) closeImplied(name);
-      const el = element(name, attrs, null);
-      append(current(), el);
-      const selfClosed = token.selfClosing && (inForeign() || name === 'svg' || name === 'math');
-      if (!VOID.has(name) && !selfClosed) {
-        stack.push(el);
-        if (name === 'template') templateDepth++;
-      }
-      continue;
-    }
-
-    // End tag.
-    const { name } = token;
-    if (name === 'html' || name === 'body' || name === 'br') continue;
-    if (name === 'head') {
-      const index = stack.indexOf(head as unknown as HtmlElement);
-      if (index >= 0) popTo(index);
-      headClosed = true;
-      continue;
-    }
-    for (let index = stack.length - 1; index > 0; index--) {
-      const el = stack[index];
-      if (el.name === name) {
-        popTo(index);
-        break;
-      }
-      if (el.name === 'body' || (SCOPE_BOUNDARY.has(el.name) && el.name !== name && name !== 'table')) break;
-    }
-    if (!body && head && stack[stack.length - 1] === html) headClosed = true;
-  }
+  // htmlAutoCloseOnEnd.
+  while (open.length) pop();
+  endData();
   return doc;
 }
 
@@ -547,22 +575,47 @@ export function hasAncestor(el: HtmlElement, ancestor: HtmlElement): boolean {
   return false;
 }
 
-/** An attribute's value with the ends trimmed, or "" when the attribute is missing. */
+/**
+ * Attributes BeautifulSoup holds as a list of words, split on Python's
+ * whitespace: class on every element, rel on links and so on.
+ */
+const LIST_ATTRIBUTES: Record<string, readonly string[]> = {
+  '*': ['class', 'accesskey', 'dropzone'],
+  a: ['rel', 'rev'],
+  link: ['rel', 'rev'],
+  td: ['headers'],
+  th: ['headers'],
+  form: ['accept-charset'],
+  object: ['archive'],
+  area: ['rel'],
+  icon: ['sizes'],
+  iframe: ['sandbox'],
+  output: ['for'],
+};
+
+/**
+ * An attribute's value as page_checks.py's _attr reads it, or "" when the
+ * attribute is missing: Python's strip(), or the words of a list attribute
+ * joined by one space.
+ */
 export function attr(el: HtmlElement | null | undefined, name: string): string {
   const value = el?.attrs[name];
-  return value === undefined ? '' : value.trim();
+  if (value === undefined || !el) return '';
+  return isListAttribute(el, name) ? pySplit(value).join(' ') : pyStrip(value);
+}
+
+/** Whether BeautifulSoup holds this attribute of this element as a list of words. */
+export function isListAttribute(el: HtmlElement, name: string): boolean {
+  return LIST_ATTRIBUTES['*'].includes(name) || (LIST_ATTRIBUTES[el.name]?.includes(name) ?? false);
 }
 
 export function hasAttr(el: HtmlElement, name: string): boolean {
   return Object.prototype.hasOwnProperty.call(el.attrs, name);
 }
 
+/** BeautifulSoup's interesting_string_types: a script's text is its script, a template's its template strings, any other element's plain text. */
 function textFlavourKept(node: HtmlText, root: HtmlElement): boolean {
-  if (node.flavour === 'text') return true;
-  // The element's own kind of string counts: a script's text is its JSON-LD.
-  if (node.flavour === 'script') return root.name === 'script';
-  if (node.flavour === 'style') return root.name === 'style';
-  return root.name === 'template' || closest(root, 'template') !== null;
+  return node.flavour === (CONTAINERS[root.name] ?? 'text');
 }
 
 /**
@@ -576,7 +629,8 @@ export function textParts(root: HtmlElement): string[] {
     const node = stack.pop() as HtmlNode;
     if (node.kind === 'text') {
       if (!textFlavourKept(node, root)) continue;
-      const trimmed = node.value.trim();
+      // BeautifulSoup strips each string with Python's strip().
+      const trimmed = pyStrip(node.value);
       if (trimmed) parts.push(trimmed);
       continue;
     }
@@ -587,7 +641,8 @@ export function textParts(root: HtmlElement): string[] {
 
 /** `root`'s text in one line: the strings joined by a space, every run of space made one. */
 export function textOf(root: HtmlElement): string {
-  return textParts(root).join(' ').replace(/\s+/g, ' ').trim();
+  // re.sub(r"\s+", " ", ...).strip(), with Python's whitespace.
+  return pySplit(textParts(root).join(' ')).join(' ');
 }
 
 /** Every string under `root`, untrimmed and with nothing left out (a script's JSON, for one). */

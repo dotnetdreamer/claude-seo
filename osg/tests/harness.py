@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +20,7 @@ import agentic_check  # noqa: E402
 import content_quality  # noqa: E402
 import metadata_template  # noqa: E402
 import page_checks  # noqa: E402
-from bs4 import BeautifulSoup  # noqa: E402
+from bs4 import BeautifulSoup, NavigableString, Tag  # noqa: E402
 
 
 def robots(payload: dict) -> dict:
@@ -110,6 +111,109 @@ def json_errors(payload: dict) -> list:
     return out
 
 
+def pages(payload: dict) -> list:
+    """page_checks.run_checks on each page, as parity.test.ts compares one page."""
+    out = []
+    for page in payload["pages"]:
+        try:
+            result = page_checks.run_checks(
+                page["html"], page["url"], page.get("headers"), html_bytes=page.get("bytes")
+            )
+        except Exception as exc:  # noqa: BLE001 - the port must fail the same way
+            out.append({"error": f"{type(exc).__name__}: {exc}"})
+            continue
+        out.append(
+            {
+                "findings": [
+                    {
+                        "id": f["id"],
+                        "severity": f["severity"],
+                        "count": f.get("count"),
+                        "evidence": f.get("evidence"),
+                    }
+                    for f in result["findings"]
+                ],
+                "not_checked": [entry["id"] for entry in result["not_checked"]],
+                "facts": result["facts"],
+                "checks_run": result["summary"]["checks_run"],
+                "headers_available": result["headers_available"],
+            }
+        )
+    return out
+
+
+def py_text(payload: dict) -> list:
+    """What Python's string methods give for each text, for py.ts."""
+    out = []
+    for text in payload["texts"]:
+        out.append(
+            [
+                text.lower(),
+                text.strip(),
+                text.lstrip(),
+                text.rstrip(),
+                text.split(),
+                repr(text),
+                [ch.isalnum() for ch in text],
+                [ch.isalpha() for ch in text],
+                [ch.isspace() for ch in text],
+                [bool(re.match(r"\w", ch)) for ch in text],
+                [bool(re.match(r"\d", ch)) for ch in text],
+                [m.start() for m in re.finditer(r"\b", text)],
+                text.strip("._- "),
+            ]
+        )
+    return {"each": out, "sorted": sorted(payload["texts"])}
+
+
+def _tree(node) -> list:
+    out = []
+    for child in node.children:
+        if isinstance(child, Tag):
+            out.append(
+                [
+                    child.name,
+                    {
+                        k: (" ".join(v) if isinstance(v, list) else v)
+                        for k, v in child.attrs.items()
+                    },
+                    _tree(child),
+                ]
+            )
+        elif isinstance(child, NavigableString):
+            out.append([type(child).__name__, str(child)])
+    return out
+
+
+def trees(payload: dict) -> list:
+    """The tree BeautifulSoup builds with lxml for each document: elements, strings and their kinds."""
+    return [_tree(BeautifulSoup(html, page_checks._HTML_PARSER)) for html in payload["documents"]]
+
+
+def decode(payload: dict) -> list:
+    """url_safety.decode_body on each case's bytes (base64) and Content-Type."""
+    import base64
+
+    import url_safety
+
+    out = []
+    for case in payload["cases"]:
+        try:
+            out.append(
+                url_safety.decode_body(base64.b64decode(case["bytes"]), case["content_type"])
+            )
+        except Exception as exc:  # noqa: BLE001 - the port must fail the same way
+            out.append({"error": f"{type(exc).__name__}: {exc}"})
+    return out
+
+
+def batch(handler, key: str, field: str):
+    """A handler that reads one input at a time, run on a list of them."""
+    return lambda payload: [
+        handler({field: value}) if field else handler(value) for value in payload[key]
+    ]
+
+
 HANDLERS = {
     "robots": robots,
     "llms": llms,
@@ -118,6 +222,16 @@ HANDLERS = {
     "metadata-site": metadata_site,
     "html-text": html_text,
     "json-errors": json_errors,
+    "pages": pages,
+    "decode": decode,
+    "trees": trees,
+    "py-text": py_text,
+    "robots-batch": batch(robots, "texts", "text"),
+    "llms-batch": lambda payload: [
+        llms({"status": 200, "content": text}) for text in payload["texts"]
+    ],
+    "content-batch": batch(content, "texts", "text"),
+    "metadata-batch": batch(metadata, "pairs", ""),
 }
 
 if __name__ == "__main__":

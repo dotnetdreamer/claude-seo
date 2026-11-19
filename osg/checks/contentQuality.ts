@@ -5,7 +5,7 @@
 // The AI-pattern phrases come from the Wikipedia "AI Cleanup" project's
 // catalogue of LLM-typical phrasing (CC BY-SA 4.0), as the script cites.
 
-import { pyRound, pyRoundInt, WORD_CHAR } from './py.ts';
+import { PY_DIGIT, PY_SPACE, PY_WORD, pyClass, pyLower, pyRound, pyRoundInt, pyStrip, WORD_CHAR } from './py.ts';
 
 export const FILLER_PHRASES = [
   "it's important to note that",
@@ -90,8 +90,11 @@ export const AI_PATTERNS = [
 // ideograph, so the script's scan stops there and so does this class.
 const EAST_ASIAN = '\\u1100-\\u11ff\\u2e80-\\u33ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\ua960-\\ua97f\\uac00-\\ud7ff\\uf900-\\ufaff\\uff66-\\uffdc\\u{16fe0}-\\u{18d8f}\\u{1aff0}-\\u{1b2ff}\\u{20000}-\\u{10ffff}';
 const NOT_EAST_ASIAN = `(?![${EAST_ASIAN}])`;
+// Letters and marks by Python's unicodedata (py.ts), not the browser's Unicode version.
+const LETTER = pyClass('L');
+const MARK = `(?:${pyClass('Mn')}|${pyClass('Mc')})`;
 const TOKEN = new RegExp(
-  `${NOT_EAST_ASIAN}\\p{L}(?:${NOT_EAST_ASIAN}[\\p{L}\\p{Mn}\\p{Mc}'\\-\\u200c\\u200d])*` +
+  `${NOT_EAST_ASIAN}${LETTER}(?:${NOT_EAST_ASIAN}(?:${LETTER}|${MARK}|['\\-\\u200c\\u200d]))*` +
     '|[\\uac00-\\ud7a3]+' +
     '|[\\u3041-\\u3096\\u30a1-\\u30fa\\u30fc]' +
     '|[\\u3400-\\u4dbf\\u4e00-\\u9fff]',
@@ -99,12 +102,14 @@ const TOKEN = new RegExp(
 );
 const W = WORD_CHAR;
 const BOUNDARY = `(?:(?<=${W})(?!${W})|(?<!${W})(?=${W}))`;
-const NUMBER = new RegExp(`${BOUNDARY}\\p{Nd}+(?:[.,]\\p{Nd}+)?(?:%|st|nd|rd|th)?${BOUNDARY}`, 'gu');
-const ENTITY = new RegExp(`${BOUNDARY}(?:[A-Z][a-z]+(?:\\s+[A-Z][a-z]+)+)${BOUNDARY}`, 'gu');
+const NUMBER = new RegExp(`${BOUNDARY}${PY_DIGIT}+(?:[.,]${PY_DIGIT}+)?(?:%|st|nd|rd|th)?${BOUNDARY}`, 'gu');
+const ENTITY = new RegExp(`${BOUNDARY}(?:[A-Z][a-z]+(?:${PY_SPACE}+[A-Z][a-z]+)+)${BOUNDARY}`, 'gu');
+/** Python's [^\W\d_]: a word character that isn't a digit or "_". */
+const PY_ALPHA = `(?:(?!${PY_DIGIT}|_)${PY_WORD})`;
 const CJK_CHAR = /[\uac00-\ud7a3\u3041-\u3096\u30a1-\u30fa\u30fc\u3400-\u4dbf\u4e00-\u9fff]/gu;
 const LATIN_CHAR = /[A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff]/gu;
-const ALPHA_CHAR = new RegExp('[\\p{L}\\p{Nl}\\p{No}]', 'gu');
-const UNSEGMENTED_CHAR = new RegExp('(?=[\\u0e00-\\u0eff\\u1000-\\u109f\\u1780-\\u17ff\\ua9e0-\\ua9ff\\uaa60-\\uaa7f])[\\p{L}\\p{Nl}\\p{No}]', 'gu');
+const ALPHA_CHAR = new RegExp(PY_ALPHA, 'gu');
+const UNSEGMENTED_CHAR = new RegExp(`(?=[\\u0e00-\\u0eff\\u1000-\\u109f\\u1780-\\u17ff\\ua9e0-\\ua9ff\\uaa60-\\uaa7f])${PY_ALPHA}`, 'gu');
 
 function tokenise(text: string): string[] {
   return text.normalize('NFC').match(TOKEN) ?? [];
@@ -116,7 +121,7 @@ function escapeRegExp(text: string): string {
 
 const phraseCache = new Map<string, RegExp>();
 function phraseHits(text: string, patterns: readonly string[]): string[] {
-  const lowered = text.toLowerCase();
+  const lowered = pyLower(text);
   return patterns.filter((pattern) => {
     let regex = phraseCache.get(pattern);
     if (!regex) {
@@ -171,7 +176,7 @@ export type ContentFlag = 'filler' | 'ai-patterns' | 'low-density' | 'repetitive
 
 /** Score a block of text against the Quality Rater Guidelines heuristics. */
 export function analyseText(text: string): ContentQuality {
-  if (!text || !text.trim()) {
+  if (!text || !pyStrip(text)) {
     return {
       filler_score: 0,
       ai_pattern_score: 0,
@@ -184,7 +189,7 @@ export function analyseText(text: string): ContentQuality {
       unique_tokens: 0,
     };
   }
-  const tokens = tokenise(text).map((token) => token.toLowerCase());
+  const tokens = tokenise(text).map((token) => pyLower(token));
   const n = tokens.length;
   const unique = new Set(tokens).size;
   const filler = phraseHits(text, FILLER_PHRASES);

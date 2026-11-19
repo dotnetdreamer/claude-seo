@@ -21,6 +21,7 @@ import {
 } from './html.ts';
 import { canonicalizeUrl, joinUrl, schemeAndHost, urlMatchKey } from './url.ts';
 import { pythonJsonError } from './pyJson.ts';
+import { PY_BOUNDARY, PY_DIGIT, PY_END, PY_SPACE, PY_SPACE_CHARS, PY_WORD, pyCaseBlind, pyClass, pyIsAlnum, pyIsAlpha, pyLower, pyLstrip, pyRound, pyRstrip, pySorted, pySplit, pyStrip } from './py.ts';
 
 // --- Thresholds (page_checks.py, "Thresholds: one table") ------------------
 
@@ -172,16 +173,19 @@ const ROBOTS_GENERAL_AGENTS = ['', 'googlebot'];
 const ROBOTS_OTHER_AGENTS_MAX = 10;
 const UTF8_ALIASES: Record<string, string> = { utf8: 'utf-8', 'utf-8': 'utf-8', 'unicode-1-1-utf-8': 'utf-8' };
 
-const PLACEHOLDER = /\blorem ipsum\b|\bdolor sit amet\b|\bconsectetur adipiscing\b/i;
-// Python's [^\W\d_][\w'-]*: a letter (or a numeral that is not a digit), then word characters.
-const WORD = new RegExp("[\\p{L}\\p{Nl}\\p{No}][\\p{L}\\p{N}_'-]*", 'gu');
-const TRACKING_PARAM = /^(utm_|fbclid$|gclid$|msclkid$|mc_)/i;
+// Python's \b and re.I, with Python's word characters (py.ts).
+const PLACEHOLDER = new RegExp(['lorem ipsum', 'dolor sit amet', 'consectetur adipiscing'].map((phrase) => `${PY_BOUNDARY}${pyCaseBlind(phrase)}${PY_BOUNDARY}`).join('|'), 'iu');
+// Python's [^\W\d_][\w'-]*: a word character that isn't a digit or "_", then word characters, ' and -.
+const WORD = new RegExp(`(?:(?!${PY_DIGIT}|_)${PY_WORD})${pyClass('alnum', "_'\\-")}*`, 'gu');
+const TRACKING_PARAM = new RegExp(`^(${pyCaseBlind('utm_')}|${pyCaseBlind('fbclid')}${PY_END}|${pyCaseBlind('gclid')}${PY_END}|${pyCaseBlind('msclkid')}${PY_END}|${pyCaseBlind('mc_')})`, 'iu');
+const SPACES = new RegExp(`${PY_SPACE}+`, 'g');
+const CHARSET = new RegExp(`${pyCaseBlind('charset')}${PY_SPACE}*=${PY_SPACE}*['"]?([^;,'"${PY_SPACE_CHARS}]+)`, 'iu');
+const LD_JSON = new RegExp(pyCaseBlind('ld+json'), 'iu');
+const LEADING_COMMENTS = new RegExp(`^(?:<!--[^]*?-->${PY_SPACE}*)+`);
 const CRAWLER_NAME = /^[a-z][a-z0-9_.-]*$/;
 const CONTROL = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g;
 const UNSPACED_SCRIPT = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff]/g;
 const UNSPACED_LANGS = ['zh', 'ja', 'th', 'lo', 'km', 'my'];
-const LETTER = new RegExp('\\p{L}', 'u');
-const ALNUM = new RegExp('[\\p{L}\\p{N}]', 'u');
 
 // --- Small helpers ---------------------------------------------------------
 
@@ -198,9 +202,9 @@ function chars(text: string): string[] {
 
 /** One line of untrusted text: control characters out, cut to `limit` characters. */
 export function trimEvidence(value: unknown, limit: number = EVIDENCE_MAX_CHARS): string {
-  const text = String(value).replace(CONTROL, ' ').replace(/\s+/g, ' ').trim();
+  const text = pyStrip(String(value).replace(CONTROL, ' ').replace(SPACES, ' '));
   const list = chars(text);
-  return list.length <= limit ? text : `${list.slice(0, limit - 3).join('').trimEnd()}...`;
+  return list.length <= limit ? text : `${pyRstrip(list.slice(0, limit - 3).join(''))}...`;
 }
 
 function sample(values: readonly string[], each = 60): string {
@@ -213,25 +217,16 @@ function isGenericAnchor(anchor: string): boolean {
   if (list.length > GENERIC_ANCHOR_MAX_CHARS) return false;
   let start = 0;
   let end = list.length;
-  while (start < end && !ALNUM.test(list[start])) start++;
-  while (end > start && !ALNUM.test(list[end - 1])) end--;
-  return GENERIC_ANCHORS.has(list.slice(start, end).join('').toLowerCase());
-}
-
-function stripChars(word: string, set: string): string {
-  let start = 0;
-  let end = word.length;
-  while (start < end && set.includes(word[start])) start++;
-  while (end > start && set.includes(word[end - 1])) end--;
-  return word.slice(start, end);
+  while (start < end && !pyIsAlnum(list[start])) start++;
+  while (end > start && !pyIsAlnum(list[end - 1])) end--;
+  return GENERIC_ANCHORS.has(pyLower(list.slice(start, end).join('')));
 }
 
 export function tokenize(text: string): string[] {
   const normal = (text || '').replace(/\u2019/g, "'").replace(/\u2018/g, "'");
   const out: string[] = [];
   for (const match of normal.matchAll(WORD)) {
-    const word = stripChars(match[0], "'-");
-    if (word) out.push(stripChars(match[0].toLowerCase(), "'-"));
+    if (pyStrip(match[0], "'-")) out.push(pyStrip(pyLower(match[0]), "'-"));
   }
   return out;
 }
@@ -242,42 +237,42 @@ export function significantTerms(text: string): string[] {
 
 /** Whether a count of words split on spaces means anything for this text. */
 export function wordsMeasurable(text: string, lang = ''): boolean {
-  if (UNSPACED_LANGS.includes((lang || '').toLowerCase().split('-')[0])) return false;
+  if (UNSPACED_LANGS.includes(pyLower(lang || '').split('-')[0])) return false;
   let letters = 0;
-  for (const ch of text) if (LETTER.test(ch)) letters++;
+  for (const ch of text) if (pyIsAlpha(ch)) letters++;
   if (!letters) return true;
   const unspaced = text.match(UNSPACED_SCRIPT)?.length ?? 0;
   return unspaced / letters < UNSPACED_SCRIPT_RATIO;
 }
 
 function normCharset(value: string): string {
-  const lower = (value || '').trim().toLowerCase();
+  const lower = pyLower(pyStrip(value || ''));
   return UTF8_ALIASES[lower] ?? lower;
 }
 
 function charsetOf(contentType: string): string {
-  const match = /charset\s*=\s*['"]?([^;,'"\s]+)/i.exec(contentType || '');
+  const match = CHARSET.exec(contentType || '');
   return match ? normCharset(match[1]) : '';
 }
 
 function partition(text: string, separator: string): [string, string, string] {
   const index = text.indexOf(separator);
-  if (index < 0) return [text.trim(), '', ''];
-  return [text.slice(0, index).trim(), separator, text.slice(index + separator.length).trim()];
+  if (index < 0) return [pyStrip(text), '', ''];
+  return [pyStrip(text.slice(0, index)), separator, pyStrip(text.slice(index + separator.length))];
 }
 
 /** (user agent, directive) pairs of one robots meta or X-Robots-Tag value. */
 export function robotsRules(value: string): Array<[string, string]> {
   const rules: Array<[string, string]> = [];
   let agent = '';
-  for (const part of (value || '').toLowerCase().split(',')) {
+  for (const part of pyLower(value || '').split(',')) {
     let [name, sep, rest] = partition(part, ':');
     if (sep && !ROBOTS_VALUED_DIRECTIVES.includes(name) && CRAWLER_NAME.test(name)) {
       agent = name;
       [name, sep, rest] = partition(rest, ':');
     }
     void rest;
-    if (!sep) for (const word of name.split(/\s+/).filter(Boolean)) rules.push([agent, word]);
+    if (!sep) for (const word of pySplit(name)) rules.push([agent, word]);
   }
   return rules;
 }
@@ -287,7 +282,7 @@ function robotsDirectives(value: string): Set<string> {
 }
 
 function rels(el: HtmlElement): string[] {
-  return attr(el, 'rel').toLowerCase().split(/\s+/).filter(Boolean);
+  return pySplit(pyLower(attr(el, 'rel')));
 }
 
 function isHttpUrl(url: string): boolean {
@@ -308,8 +303,8 @@ function documentBase(doc: HtmlElement, pageUrl: string): string {
 function isDecorative(img: HtmlElement): boolean {
   let node: HtmlElement | null = img;
   while (node) {
-    if (attr(node, 'aria-hidden').toLowerCase() === 'true') return true;
-    const role = attr(node, 'role').toLowerCase();
+    if (pyLower(attr(node, 'aria-hidden')) === 'true') return true;
+    const role = pyLower(attr(node, 'role'));
     if (role === 'presentation' || role === 'none') return true;
     node = node.parent;
   }
@@ -319,8 +314,8 @@ function isDecorative(img: HtmlElement): boolean {
 function inChromeZone(el: HtmlElement): boolean {
   let node = el.parent;
   while (node) {
-    if (CHROME_TAGS.includes(node.name) || CHROME_ROLES.includes(attr(node, 'role').toLowerCase())) return true;
-    const marker = `${attr(node, 'class').split(/\s+/).filter(Boolean).join(' ')} ${attr(node, 'id')}`.toLowerCase();
+    if (CHROME_TAGS.includes(node.name) || CHROME_ROLES.includes(pyLower(attr(node, 'role')))) return true;
+    const marker = pyLower(`${attr(node, 'class')} ${attr(node, 'id')}`);
     if (CHROME_MARKERS.some((token) => marker.includes(token))) return true;
     node = node.parent;
   }
@@ -334,7 +329,7 @@ function imageSrc(img: HtmlElement): string {
   }
   for (const name of ['data-srcset', 'srcset']) {
     for (const candidate of attr(img, name).split(',')) {
-      const url = candidate.trim().split(' ')[0];
+      const url = pyStrip(candidate).split(' ')[0];
       if (url && !url.startsWith('data:') && !url.startsWith('blob:')) return url;
     }
   }
@@ -384,7 +379,7 @@ function headingSkips(doc: HtmlElement): { h1: string[]; contentSkips: number; t
   let prevLevel: number | null = null;
   let prevTemplateLevel: number | null = null;
   for (const h of findAll(doc, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])) {
-    if (attr(h, 'aria-hidden').toLowerCase() === 'true') continue;
+    if (pyLower(attr(h, 'aria-hidden')) === 'true') continue;
     const text = textOf(h);
     if (!text) continue;
     const level = Number(h.name[1]);
@@ -405,21 +400,12 @@ function headingSkips(doc: HtmlElement): { h1: string[]; contentSkips: number; t
   return { h1, contentSkips, templateSkips };
 }
 
-/** Python's round(value, 2): halves go to the even neighbour. */
-function round2(value: number): number {
-  const scaled = value * 100;
-  const floor = Math.floor(scaled);
-  const fraction = scaled - floor;
-  const rounded = fraction === 0.5 ? (floor % 2 === 0 ? floor : floor + 1) : Math.round(scaled);
-  return rounded / 100;
-}
-
 function relevance(source: string, bodyTerms: Set<string>): [number | null, string[]] {
   const terms = new Set(significantTerms(source));
   if (!terms.size) return [null, []];
   const found = [...terms].filter((term) => bodyTerms.has(term)).length;
-  const missing = [...terms].filter((term) => !bodyTerms.has(term)).sort();
-  return [round2(found / terms.size), missing];
+  const missing = pySorted([...terms].filter((term) => !bodyTerms.has(term)));
+  return [pyRound(found / terms.size, 2), missing];
 }
 
 /** Python's "{:.0%}" for a share between 0 and 1. */
@@ -518,11 +504,11 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   const headersAvailable = headers !== null;
   const hdrs: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers ?? {})) {
-    hdrs[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+    hdrs[pyLower(key)] = Array.isArray(value) ? value.join(', ') : String(value);
   }
   const doc = parseHtml(html);
   const baseUrl = documentBase(doc, pageUrl);
-  const isHttps = pageUrl.toLowerCase().startsWith('https://');
+  const isHttps = pyLower(pageUrl).startsWith('https://');
   const bytes = htmlBytes ?? utf8Length(html);
 
   const findings: PageFinding[] = [];
@@ -539,7 +525,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   const htmlTag = find(doc, 'html');
   const lang = attr(htmlTag, 'lang');
   const visible = visibleText(doc);
-  const wordCount = visible.split(/\s+/).filter(Boolean).length;
+  const wordCount = pySplit(visible).length;
   const measurable = wordsMeasurable(visible, lang);
   const unspaced = 'the page is written in a script without spaces between words, so words are not counted';
 
@@ -560,7 +546,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   const metaTags: Array<[string, string, string]> = [];
   for (const meta of findAll(doc, 'meta')) {
     const content = attr(meta, 'content');
-    if (content) metaTags.push([attr(meta, 'name').toLowerCase(), attr(meta, 'property').toLowerCase(), content]);
+    if (content) metaTags.push([pyLower(attr(meta, 'name')), pyLower(attr(meta, 'property')), content]);
   }
   const description = metaTags.find(([name]) => name === 'description')?.[2] ?? '';
   if (!description) add('missing-meta-description', 'no <meta name="description"> with content');
@@ -632,11 +618,11 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   const metaRobots = robotsMetas.map(([name, content]) => `${name}: ${content}`).join('; ');
   const xRobotsValues: string[] = [];
   for (const [key, value] of Object.entries(headers ?? {})) {
-    if (key.toLowerCase() !== 'x-robots-tag') continue;
+    if (pyLower(key) !== 'x-robots-tag') continue;
     if (Array.isArray(value)) xRobotsValues.push(...value.map(String));
     else xRobotsValues.push(String(value));
   }
-  const xRobots = xRobotsValues.join(', ').trim();
+  const xRobots = pyStrip(xRobotsValues.join(', '));
   const headerRules = xRobotsValues.flatMap((value) => robotsRules(value));
   const headerDirectives = new Set(headerRules.filter(([agent]) => ROBOTS_GENERAL_AGENTS.includes(agent)).map(([, directive]) => directive));
   const otherAgentRules = [...new Set(headerRules.filter(([agent]) => !ROBOTS_GENERAL_AGENTS.includes(agent)).map(([agent, directive]) => `${agent}: ${directive}`))];
@@ -649,9 +635,9 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   if (hits(headerDirectives, 'nofollow', 'none')) nofollowSources.push(`X-Robots-Tag: ${xRobots}`);
   if (nofollowSources.length) add('nofollow', nofollowSources.join('; '));
 
-  const refresh = findAll(doc, 'meta').find((meta) => attr(meta, 'http-equiv').toLowerCase() === 'refresh');
+  const refresh = findAll(doc, 'meta').find((meta) => pyLower(attr(meta, 'http-equiv')) === 'refresh');
   const metaRefresh = refresh ? attr(refresh, 'content') : '';
-  if (metaRefresh && metaRefresh.toLowerCase().includes('url=')) add('meta-refresh-redirect', `content="${metaRefresh}"`);
+  if (metaRefresh && pyLower(metaRefresh).includes('url=')) add('meta-refresh-redirect', `content="${metaRefresh}"`);
 
   const hreflang = findAll(doc, 'link')
     .filter((link) => rels(link).includes('alternate') && attr(link, 'hreflang') && attr(link, 'href'))
@@ -661,8 +647,9 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   }
 
   // Document basics
-  const headText = html.trimStart().replace(/^\ufeff+/, '').trimStart().replace(/^(?:<!--[\s\S]*?-->\s*)+/, '');
-  const hasDoctype = chars(headText).slice(0, 15).join('').toLowerCase().startsWith('<!doctype html');
+  // html.lstrip().lstrip("\ufeff").lstrip(), then the comments before anything else.
+  const headText = pyLstrip(pyLstrip(pyLstrip(html), '\u{feff}')).replace(LEADING_COMMENTS, '');
+  const hasDoctype = pyLower(chars(headText).slice(0, 15).join('')).startsWith('<!doctype html');
   if (!hasDoctype) add('missing-doctype', headText ? `document starts with: ${chars(headText).slice(0, 40).join('')}` : 'empty document');
   let metaCharset = '';
   for (const meta of findAll(doc, 'meta')) {
@@ -670,7 +657,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
       metaCharset = normCharset(attr(meta, 'charset'));
       break;
     }
-    if (attr(meta, 'http-equiv').toLowerCase() === 'content-type') {
+    if (pyLower(attr(meta, 'http-equiv')) === 'content-type') {
       metaCharset = charsetOf(attr(meta, 'content'));
       if (metaCharset) break;
     }
@@ -684,11 +671,11 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   if (metaCharset && headerCharset && metaCharset !== headerCharset) add('charset-mismatch', `meta charset ${metaCharset}, Content-Type header charset ${headerCharset}`);
   else if (!headersAvailable) skip('charset-mismatch', 'no response headers were supplied');
   if (!lang) add('missing-lang', '<html> has no lang attribute');
-  const hasViewport = findAll(doc, 'meta').some((meta) => attr(meta, 'name').toLowerCase() === 'viewport');
+  const hasViewport = findAll(doc, 'meta').some((meta) => pyLower(attr(meta, 'name')) === 'viewport');
   if (!hasViewport) add('missing-viewport', 'no <meta name="viewport">');
   const frames = findAll(doc, ['frameset', 'frame']);
   if (frames.length) add('uses-frames', `${frames.length} <frameset> or <frame> element(s)`, frames.length);
-  const deprecated = [...new Set(findAll(doc, DEPRECATED_TAGS).map((el) => el.name))].sort();
+  const deprecated = pySorted(new Set(findAll(doc, DEPRECATED_TAGS).map((el) => el.name)));
   if (deprecated.length) add('deprecated-html-tags', deprecated.map((name) => `<${name}>`).join(', '), deprecated.length);
   const placeholder = PLACEHOLDER.exec(visible);
   if (placeholder) {
@@ -703,7 +690,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   const missingAlt: string[] = [];
   const missingDimensions: string[] = [];
   for (const img of findAll(doc, 'img')) {
-    if (attr(img, 'aria-hidden').toLowerCase() === 'true') continue;
+    if (pyLower(attr(img, 'aria-hidden')) === 'true') continue;
     const src = imageSrc(img);
     if (!src) continue;
     imagesTotal++;
@@ -718,7 +705,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   if (missingDimensions.length) add('images-missing-dimensions', `${missingDimensions.length} of ${imagesTotal} images: ${sample(missingDimensions)}`, missingDimensions.length);
   const scope = find(doc, 'main') ?? find(doc, 'body') ?? doc;
   const firstImg = find(scope, 'img');
-  const firstImageLazy = firstImg !== null && attr(firstImg, 'loading').toLowerCase() === 'lazy';
+  const firstImageLazy = firstImg !== null && pyLower(attr(firstImg, 'loading')) === 'lazy';
   if (firstImg && firstImageLazy) add('first-image-lazy-loaded', `loading="lazy" on ${imageSrc(firstImg) || 'the first <img>'}`);
 
   // Links
@@ -734,7 +721,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
       || findAll(a, 'img').some((img) => attr(img, 'alt'))
       || findAll(a, 'svg').some((svg) => find(svg, 'title') !== null));
     if (!named) linksWithoutText.push(href || '(empty href)');
-    if (!href || SKIPPED_LINK_SCHEMES.some((scheme) => href.toLowerCase().startsWith(scheme))) continue;
+    if (!href || SKIPPED_LINK_SCHEMES.some((scheme) => pyLower(href).startsWith(scheme))) continue;
     const full = joinUrl(baseUrl, href);
     if (!full) continue;
     const { scheme, host } = schemeAndHost(full);
@@ -750,10 +737,10 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
 
   const mixed: string[] = [];
   if (isHttps) {
-    for (const el of findAll(doc, MIXED_CONTENT_TAGS)) if (attr(el, 'src').toLowerCase().startsWith('http://')) mixed.push(attr(el, 'src'));
+    for (const el of findAll(doc, MIXED_CONTENT_TAGS)) if (pyLower(attr(el, 'src')).startsWith('http://')) mixed.push(attr(el, 'src'));
     for (const link of findAll(doc, 'link').filter((el) => hasAttr(el, 'href'))) {
       const linkRels = rels(link);
-      if ((linkRels.includes('stylesheet') || linkRels.includes('preload')) && attr(link, 'href').toLowerCase().startsWith('http://')) mixed.push(attr(link, 'href'));
+      if ((linkRels.includes('stylesheet') || linkRels.includes('preload')) && pyLower(attr(link, 'href')).startsWith('http://')) mixed.push(attr(link, 'href'));
     }
   }
   if (mixed.length) add('mixed-content', `${mixed.length} resource(s): ${sample(mixed)}`, mixed.length);
@@ -766,7 +753,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   if (charLength(pageUrl) > URL_MAX_CHARS) add('url-too-long', `${charLength(pageUrl)} characters: ${pageUrl}`);
   if (contentParams.length) add('url-has-parameters', `parameters: ${sample(contentParams, 30)} (tracking parameters are ignored)`, contentParams.length);
   const unescapedPath = path.replace(/%[0-9A-Fa-f]{2}/g, '');
-  if (unescapedPath !== unescapedPath.toLowerCase()) add('url-uppercase', `path ${path}`);
+  if (unescapedPath !== pyLower(unescapedPath)) add('url-uppercase', `path ${path}`);
   if (path.includes('_')) add('url-underscores', `path ${path}`);
   if ([...pageUrl].some((ch) => (ch.codePointAt(0) ?? 0) > 127)) add('url-non-ascii', pageUrl);
   if (path.includes('//')) add('url-double-slash', `path ${path}`);
@@ -784,9 +771,10 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   // JSON-LD
   let jsonldBlocks = 0;
   const jsonldErrors: string[] = [];
-  for (const script of findAll(doc, 'script').filter((el) => /ld\+json/i.test(el.attrs.type ?? ''))) {
+  for (const script of findAll(doc, 'script').filter((el) => LD_JSON.test(el.attrs.type ?? ''))) {
     const raw = rawText(script);
-    if (!raw || !raw.trim()) continue;
+    // Python's strip(): a block of only U+FEFF is still a block, and json.loads says why it fails.
+    if (!raw || !pyStrip(raw)) continue;
     jsonldBlocks++;
     // Python's json.loads, which reads NaN and words its errors its own way (pyJson.ts).
     const problem = pythonJsonError(raw);
