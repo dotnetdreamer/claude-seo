@@ -1,0 +1,12 @@
+User-agent: OAI-SearchBot
+Disallow: /
+User-agent: PerplexityBot
+Disallow: /private
+User-agent: Claude-SearchBot
+Disallow: /$
+User-agent: ChatGPT-User/1.0
+Disallow: /
+User-agent: Perplexity-User*
+Disallow: /
+User-agent: *
+Disallow:

@@ -1,0 +1,8 @@
+User-agent: *
+Disallow: /*
+Allow: /$
+Allow: /index.html
+User-agent: claudebot
+Disallow: /*.php$
+Allow: /
+﻿# a comment with a line separator User-agent: GPTBot

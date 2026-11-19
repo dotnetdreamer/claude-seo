@@ -1,0 +1,9 @@
+# Pebble Notes
+
+> Quick notes, lists and voice memos that sync across your phone, tablet and computer.
+
+## Pages
+
+- [Home](https://pebble.example/): what the app does
+- [Support](https://pebble.example/support/): answers about sync
+- [Privacy](https://pebble.example/privacy/)

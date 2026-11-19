@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "about": "What Open Screenshot Generator's SEO view reads from this repository. The app downloads these files when the view opens (pinned to a commit, each checked against its git hash) and sends them to the user's AI as background knowledge. Paths are from the repository root.",
+  "updates": "data/google-updates.json",
+  "jobs": {
+    "fix-plan": {
+      "about": "Turn the site check's findings into a short, ordered plan.",
+      "maxCharacters": 60000,
+      "files": [
+        "skills/seo/references/quality-gates.md",
+        "skills/seo-technical/SKILL.md",
+        "skills/seo-page/SKILL.md",
+        "skills/seo/references/schema-types.md",
+        "skills/seo-hreflang/SKILL.md",
+        "skills/seo/references/thinking-framework.md"
+      ]
+    },
+    "ai-search": {
+      "about": "Explain what AI search tools and agents can read, and draft llms.txt.",
+      "maxCharacters": 45000,
+      "files": [
+        "skills/seo-geo/SKILL.md",
+        "skills/seo-agentic/SKILL.md"
+      ]
+    },
+    "copy": {
+      "about": "Rewrite page titles, descriptions and copy so they read as written by a person.",
+      "maxCharacters": 40000,
+      "files": [
+        "skills/seo-content/SKILL.md",
+        "skills/seo/references/eeat-framework.md",
+        "skills/seo/references/quality-gates.md"
+      ]
+    },
+    "google": {
+      "about": "Read Search Console, Analytics, PageSpeed and Core Web Vitals numbers.",
+      "maxCharacters": 45000,
+      "files": [
+        "skills/seo/references/cwv-thresholds.md",
+        "skills/seo-google/references/search-console-api.md",
+        "skills/seo-google/references/ga4-data-api.md",
+        "skills/seo-google/references/pagespeed-crux-api.md"
+      ]
+    },
+    "ask": {
+      "about": "Answer the user's own questions about their site.",
+      "maxCharacters": 60000,
+      "files": [
+        "skills/seo/references/quality-gates.md",
+        "skills/seo-technical/SKILL.md",
+        "skills/seo-geo/SKILL.md",
+        "skills/seo/references/cwv-thresholds.md"
+      ]
+    }
+  }
+}

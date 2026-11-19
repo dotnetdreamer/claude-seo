@@ -1,0 +1,4 @@
+Pebble Notes
+
+- [Home](https://pebble.example/)
+- [Support](https://pebble.example/support/)

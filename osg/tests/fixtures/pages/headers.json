@@ -1,0 +1,7 @@
+{
+  "url": "https://headers.example/kept-out",
+  "headers": {
+    "Content-Type": "text/html; charset=utf-8",
+    "X-Robots-Tag": ["otherbot: noindex", "googlebot: noindex, nofollow"]
+  }
+}
