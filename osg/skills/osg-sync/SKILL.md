@@ -36,9 +36,11 @@ a severity, a check id, a phrase list, the robots.txt agent list
 ## 3. Run the parity tests
 
 ```bash
-OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts
+OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts osg/tests/generated.test.ts
 ```
 
+If upstream raised its lxml or BeautifulSoup version, run
+`python osg/tests/make_entities.py` first in case the HTML5 table changed.
 A failure names the page or file and shows the difference. Change the
 matching file in `osg/checks/` until the tests pass. Keep the TypeScript
 close to the Python line by line, so the next diff is easy to follow.

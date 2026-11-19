@@ -1,0 +1,2 @@
+# A page saved on Windows: its CR LF line endings are what the test is about.
+tests/fixtures/pages/crlf.html -text

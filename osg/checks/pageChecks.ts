@@ -20,6 +20,7 @@ import {
   type HtmlElement,
 } from './html.ts';
 import { canonicalizeUrl, joinUrl, schemeAndHost, urlMatchKey } from './url.ts';
+import { pythonJsonError } from './pyJson.ts';
 
 // --- Thresholds (page_checks.py, "Thresholds: one table") ------------------
 
@@ -787,11 +788,9 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
     const raw = rawText(script);
     if (!raw || !raw.trim()) continue;
     jsonldBlocks++;
-    try {
-      JSON.parse(raw);
-    } catch (error) {
-      jsonldErrors.push(`block ${jsonldBlocks}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    // Python's json.loads, which reads NaN and words its errors its own way (pyJson.ts).
+    const problem = pythonJsonError(raw);
+    if (problem !== null) jsonldErrors.push(`block ${jsonldBlocks}: ${problem}`);
   }
   if (jsonldErrors.length) add('invalid-jsonld', `${jsonldErrors.length} of ${jsonldBlocks} JSON-LD block(s): ${jsonldErrors.join('; ')}`, jsonldErrors.length);
 

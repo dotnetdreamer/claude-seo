@@ -28,25 +28,35 @@ ways:
 | `checks/llms.ts` | `scripts/agentic_check.py`: llms.txt by the Lighthouse rules |
 | `checks/contentQuality.ts` | `scripts/content_quality.py`: filler, AI phrasing, repetition and density |
 | `checks/metadataTemplate.ts` | `scripts/metadata_template.py`: machine-made title and description pairs |
-| `checks/html.ts`, `checks/url.ts`, `checks/py.ts` | the parts of BeautifulSoup, lxml and Python the checks depend on |
+| `checks/html.ts`, `checks/entities.ts`, `checks/url.ts`, `checks/py.ts` | the parts of BeautifulSoup, lxml and Python the checks depend on |
+| `checks/pyJson.ts` | Python's `json.loads`: what it reads (NaN too) and its error messages, for the JSON-LD check |
 
 The files use only TypeScript that Node can run as is (no enums, `.ts` in
 imports), so the tests below need no build step.
+
+`checks/entities.ts` is written by `tests/make_entities.py` from Python's copy
+of the HTML5 table. lxml 6 (libxml2 2.14) reads character references as HTML5
+does, so the port does too.
 
 ## Proving the port still matches
 
 `tests/parity.test.ts` runs the Python scripts and the TypeScript versions on
 the same pages (`tests/fixtures/`) and fails on any difference in a finding,
 its evidence text, a fact, a robots.txt verdict, an llms.txt verdict or a
-copy score.
+copy score. `tests/generated.test.ts` sends both the same generated inputs:
+over 30,000 character references (every HTML5 name, numbers, stray
+ampersands) and 6,000 broken JSON-LD blocks, down to the depth where Python
+gives up.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts
+OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/parity.test.ts osg/tests/generated.test.ts
 ```
 
 It needs Node 22.18 or newer and the Python packages in `requirements.txt`
-(beautifulsoup4, lxml and requests are enough).
+(beautifulsoup4, lxml and requests are enough). The nesting limit follows
+CPython 3.13 on macOS and Linux; another Python version can stop at a
+different depth, and the last part of the JSON-LD test says so.
 
 ## After syncing with upstream
 

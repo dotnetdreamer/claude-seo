@@ -50,7 +50,7 @@ for (const file of pages) {
     const ts = runPageChecks(html, meta.url, meta.headers ?? null, raw.length);
 
     const shape = (findings: any[]) =>
-      findings.map((f) => ({ id: f.id, severity: f.severity, count: f.count ?? null, evidence: f.id === 'invalid-jsonld' ? '(json error text differs by language)' : f.evidence }));
+      findings.map((f) => ({ id: f.id, severity: f.severity, count: f.count ?? null, evidence: f.evidence }));
     assert.deepEqual(shape(ts.findings), shape(py.findings), 'findings differ');
     assert.deepEqual(ts.notChecked.map((n) => n.id), py.not_checked.map((n: any) => n.id), 'not checked differs');
     assert.deepEqual(ts.facts, py.facts, 'facts differ');

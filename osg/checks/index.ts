@@ -48,6 +48,8 @@ export { lighthouseLlmsTxt, type LlmsVerdict } from './llms.ts';
 export { analyseText, FILLER_PHRASES, AI_PATTERNS, type ContentQuality } from './contentQuality.ts';
 export { analyseMetadata, analyseMetadataPairs, type MetadataResult, type MetadataSiteResult, type MetadataSignal } from './metadataTemplate.ts';
 export { pyRound } from './py.ts';
+export { pythonJsonError, NESTED_TOO_DEEPLY } from './pyJson.ts';
+export { decodeEntities } from './html.ts';
 
 /** Which Python scripts these files follow, for the app's notes and the sync skill. */
 export const PORTED_FROM = [
