@@ -4,7 +4,7 @@
 const TRACKING_KEYS = new Set(['fbclid', 'gclid', 'mc_cid', 'mc_eid', '_ga', 'ref']);
 const UNRESERVED = /^[A-Za-z0-9\-._~]$/;
 
-interface SplitUrl {
+export interface SplitUrl {
   scheme: string;
   netloc: string;
   path: string;
@@ -63,6 +63,141 @@ export function splitUrl(raw: string, defaultScheme = ''): SplitUrl {
     }
   }
   return { scheme, netloc, path: url, params, query, fragment };
+}
+
+/** Where Python's urlsplit raises ValueError. */
+export class PyUrlError extends Error {}
+
+/** ipaddress.IPv4Address's parse: four decimal octets, no leading zeros, each up to 255. */
+function isIPv4(text: string): boolean {
+  if (!text || text.includes('/')) return false;
+  const octets = text.split('.');
+  return octets.length === 4 && octets.every((octet) => /^[0-9]{1,3}$/.test(octet) && (octet === '0' || octet[0] !== '0') && Number(octet) <= 255);
+}
+
+/** ipaddress.IPv6Address's parse, a scope after "%" allowed. */
+function isIPv6(text: string): boolean {
+  if (text.includes('/')) return false;
+  const percent = text.indexOf('%');
+  let address = text;
+  if (percent >= 0) {
+    const scope = text.slice(percent + 1);
+    if (!scope || scope.includes('%')) return false;
+    address = text.slice(0, percent);
+  }
+  if (!address || address.length > 45) return false;
+  const parts = address.split(':');
+  if (parts.length < 3) return false;
+  if (parts[parts.length - 1].includes('.')) {
+    if (!isIPv4(parts.pop()!)) return false;
+    parts.push('0', '0');
+  }
+  if (parts.length > 9) return false;
+  let skip = -1;
+  for (let i = 1; i < parts.length - 1; i++) {
+    if (!parts[i]) {
+      if (skip >= 0) return false;
+      skip = i;
+    }
+  }
+  let hi: number;
+  let lo: number;
+  if (skip >= 0) {
+    hi = skip;
+    lo = parts.length - skip - 1;
+    if (!parts[0] && --hi) return false;
+    if (!parts[parts.length - 1] && --lo) return false;
+    if (8 - (hi + lo) < 1) return false;
+  } else {
+    if (parts.length !== 8 || !parts[0] || !parts[parts.length - 1]) return false;
+    hi = parts.length;
+    lo = 0;
+  }
+  const hextet = (part: string) => /^[0-9a-fA-F]{1,4}$/.test(part);
+  for (let i = 0; i < hi; i++) if (!hextet(parts[i])) return false;
+  for (let i = parts.length - lo; i < parts.length; i++) if (!hextet(parts[i])) return false;
+  return true;
+}
+
+/**
+ * Python's urlparse, raising where its urlsplit raises ValueError: a "[" or
+ * "]" without the other, a bracketed host that isn't an IPv6 (or IPvFuture)
+ * address, or a host that NFKC turns into one with "/", "?", "#", "@" or ":".
+ */
+export function pyUrlparse(raw: string, defaultScheme = ''): SplitUrl {
+  const parts = splitUrl(raw, defaultScheme);
+  const { netloc } = parts;
+  const open = netloc.includes('[');
+  const close = netloc.includes(']');
+  if (open !== close) throw new PyUrlError('Invalid IPv6 URL');
+  if (open && close) {
+    const hostAndPort = netloc.slice(netloc.lastIndexOf('@') + 1);
+    let host: string;
+    const at = hostAndPort.indexOf('[');
+    if (at >= 0) {
+      if (at > 0) throw new PyUrlError('Invalid IPv6 URL');
+      const bracketed = hostAndPort.slice(at + 1);
+      const end = bracketed.indexOf(']');
+      host = end >= 0 ? bracketed.slice(0, end) : bracketed;
+      const port = end >= 0 ? bracketed.slice(end + 1) : '';
+      if (port && !port.startsWith(':')) throw new PyUrlError('Invalid IPv6 URL');
+    } else {
+      const colon = hostAndPort.indexOf(':');
+      host = colon >= 0 ? hostAndPort.slice(0, colon) : hostAndPort;
+    }
+    if (host.startsWith('v')) {
+      if (!/^v[a-fA-F0-9]+\.[^\n]+$/.test(host)) throw new PyUrlError('IPvFuture address is invalid');
+    } else if (isIPv4(host) || !isIPv6(host)) {
+      throw new PyUrlError('Invalid IPv6 URL');
+    }
+  }
+  // _checknetloc
+  if (netloc && /[^\x00-\x7f]/.test(netloc)) {
+    const bare = netloc.replace(/[@:#?]/g, '');
+    const normal = bare.normalize('NFKC');
+    if (normal !== bare && /[/?#@:]/.test(normal)) throw new PyUrlError('netloc contains invalid characters under NFKC normalization');
+  }
+  return parts;
+}
+
+/** urlparse(...).hostname, .port and whether there's a user part, as Python reads a netloc; .port raises as Python's does. */
+export function netlocFacts(netloc: string): { hostname: string; port: number | null; hasUser: boolean } {
+  const hostinfo = netloc.slice(netloc.lastIndexOf('@') + 1);
+  let hostname: string;
+  let port: string;
+  const open = hostinfo.indexOf('[');
+  if (open >= 0) {
+    const bracketed = hostinfo.slice(open + 1);
+    const end = bracketed.indexOf(']');
+    hostname = end >= 0 ? bracketed.slice(0, end) : bracketed;
+    const rest = end >= 0 ? bracketed.slice(end + 1) : '';
+    port = rest.includes(':') ? rest.slice(rest.indexOf(':') + 1) : '';
+  } else {
+    const colon = hostinfo.indexOf(':');
+    hostname = colon >= 0 ? hostinfo.slice(0, colon) : hostinfo;
+    port = colon >= 0 ? hostinfo.slice(colon + 1) : '';
+  }
+  let number: number | null = null;
+  if (port) {
+    if (!/^[0-9]+$/.test(port)) throw new PyUrlError(`Port could not be cast to integer value as '${port}'`);
+    number = Number(port);
+    if (number > 65535) throw new PyUrlError('Port out of range 0-65535');
+  }
+  return { hostname, port: number, hasUser: netloc.includes('@') };
+}
+
+/** Python's urljoin, raising where it raises (pyUrlparse). */
+export function pyUrljoin(base: string, href: string): string {
+  if (!base) return href;
+  if (!href) return base;
+  const scheme = pyUrlparse(base).scheme;
+  pyUrlparse(href, scheme);
+  return joinUrl(base, href);
+}
+
+/** Python's urlunparse of urlparse's parts. */
+export function unparseUrl(parts: SplitUrl): string {
+  return unsplit(parts);
 }
 
 function unsplit({ scheme, netloc, path, params, query, fragment }: SplitUrl): string {

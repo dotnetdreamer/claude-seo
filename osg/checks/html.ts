@@ -441,7 +441,7 @@ export function parseHtml(markup: string): HtmlElement {
         i = end;
         continue;
       }
-      if (/^doctype/i.test(source.slice(i + 2, i + 9))) {
+      if (/^[dD][oO][cC][tT][yY][pP][eE]/.test(source.slice(i + 2, i + 9))) {
         const close = source.indexOf('>', i + 9);
         boundary();
         i = close < 0 ? n : close + 1;

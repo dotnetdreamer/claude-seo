@@ -16,7 +16,7 @@ import { parseHtml, find, findAll, rawText } from '../checks/html.ts';
 import { NAMED_REFERENCES } from '../checks/entities.ts';
 import { pythonJsonError } from '../checks/pyJson.ts';
 import { decodeBody } from '../checks/decode.ts';
-import { PY_BOUNDARY, PY_DIGIT, PY_WORD, pyIsAlnum, pyIsAlpha, pyIsSpace, pyLower, pyLstrip, pyRepr, pyRstrip, pySorted, pySplit, pyStrip } from '../checks/py.ts';
+import { PY_DIGIT, PY_WORD, pyBoundaryAt, pyIsAlnum, pyIsAlpha, pyIsSpace, pyLower, pyLstrip, pyRepr, pyRstrip, pySorted, pySplit, pyStrip } from '../checks/py.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
@@ -161,12 +161,12 @@ test("Python's string rules: lower, strip, split, repr, \\w, \\d, \\b and sort, 
   const differences: string[] = [];
   const word = new RegExp(PY_WORD, 'u');
   const digit = new RegExp(PY_DIGIT, 'u');
-  const boundary = new RegExp(PY_BOUNDARY, 'gu');
   texts.forEach((text, index) => {
     const list = Array.from(text);
     const positions: number[] = [];
     // \\b positions as Python counts them: in code points.
-    for (const match of text.matchAll(boundary)) positions.push(Array.from(text.slice(0, match.index)).length);
+    let point = 0;
+    for (let at = 0; at <= text.length; at += (text.codePointAt(at) ?? 0) > 0xffff ? 2 : 1, point++) if (pyBoundaryAt(text, at)) positions.push(point);
     const ts = [
       pyLower(text), pyStrip(text), pyLstrip(text), pyRstrip(text), pySplit(text), pyRepr(text),
       list.map(pyIsAlnum), list.map(pyIsAlpha), list.map(pyIsSpace), list.map((ch) => word.test(ch)), list.map((ch) => digit.test(ch)), positions, pyStrip(text, '._- '),

@@ -3,7 +3,7 @@
 // call to action, the brand pasted into the description, or a description
 // that is the title again. String comparison only, no model.
 
-import { PY_END, PY_SPACE, pyCompare, pyLower, pyRepr, pyRound, pySplit, pyStrip, WORD_CHAR } from './py.ts';
+import { PY_END, PY_SPACE, pyCompare, pyIgnoreCaseSource, pyLower, pyRepr, pyRound, pySplit, pyStrip, WORD_CHAR } from './py.ts';
 
 const W = WORD_CHAR;
 const CTA_TAIL_PATTERNS = [
@@ -16,8 +16,8 @@ const CTA_TAIL_PATTERNS = [
   `(?:boost|improve|upgrade) (?:your )?(?:${W}+ ){0,3}now`,
   'sign up (?:free|now|today)',
 ];
-// re.IGNORECASE as Python reads it: an "i" in these words also matches U+0131 and U+0130 (py.ts, pyCaseBlind).
-const CTA_TAIL = new RegExp(`(${CTA_TAIL_PATTERNS.map((pattern) => pattern.replace(/i/g, '[i\\u0131\\u0130]')).join('|')})[.!]*${PY_SPACE}*${PY_END}`, 'iu');
+// re.IGNORECASE as Python reads it, without the i flag, which would widen \w as well (py.ts, pyIgnoreCaseSource).
+const CTA_TAIL = new RegExp(`(${CTA_TAIL_PATTERNS.map(pyIgnoreCaseSource).join('|')})[.!]*${PY_SPACE}*${PY_END}`, 'u');
 const BRAND_SEPARATOR = new RegExp(`${PY_SPACE}[|\\u2013\\u2014-]${PY_SPACE}`, 'u');
 const NON_ALNUM = /[^a-z0-9 ]+/g;
 const MIN_TITLE_CHARS = 25;
@@ -67,6 +67,11 @@ function stripChars(text: string, set: string): string {
 
 function titleCore(title: string): string {
   return pyStrip(title.split(BRAND_SEPARATOR)[0]);
+}
+
+/** For the parity tests (regexes.test.ts): _CTA_TAIL_RE.search(text).group(1). */
+export function ctaTail(text: string): string | null {
+  return CTA_TAIL.exec(text)?.[1] ?? null;
 }
 
 function echoRemainder(core: string, description: string): string {

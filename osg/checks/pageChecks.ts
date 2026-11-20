@@ -21,7 +21,7 @@ import {
 } from './html.ts';
 import { canonicalizeUrl, joinUrl, schemeAndHost, urlMatchKey } from './url.ts';
 import { pythonJsonError } from './pyJson.ts';
-import { PY_BOUNDARY, PY_DIGIT, PY_END, PY_SPACE, PY_SPACE_CHARS, PY_WORD, pyCaseBlind, pyClass, pyIsAlnum, pyIsAlpha, pyLower, pyLstrip, pyRound, pyRstrip, pySorted, pySplit, pyStrip } from './py.ts';
+import { PY_DIGIT, PY_END, PY_SPACE, PY_SPACE_CHARS, PY_WORD, pyIgnoreCase, pySearchAfterNonWord, pyClass, pyIsAlnum, pyIsAlpha, pyLower, pyLstrip, pyRound, pyRstrip, pySorted, pySplit, pyStrip } from './py.ts';
 
 // --- Thresholds (page_checks.py, "Thresholds: one table") ------------------
 
@@ -173,14 +173,16 @@ const ROBOTS_GENERAL_AGENTS = ['', 'googlebot'];
 const ROBOTS_OTHER_AGENTS_MAX = 10;
 const UTF8_ALIASES: Record<string, string> = { utf8: 'utf-8', 'utf-8': 'utf-8', 'unicode-1-1-utf-8': 'utf-8' };
 
-// Python's \b and re.I, with Python's word characters (py.ts).
-const PLACEHOLDER = new RegExp(['lorem ipsum', 'dolor sit amet', 'consectetur adipiscing'].map((phrase) => `${PY_BOUNDARY}${pyCaseBlind(phrase)}${PY_BOUNDARY}`).join('|'), 'iu');
+// Python's \blorem ipsum\b|... with re.I. Each phrase starts and ends with
+// one of Python's \w, so the \b before it is no \w just before
+// (pySearchAfterNonWord) and the \b after it is no \w next (py.ts).
+const PLACEHOLDER = new RegExp(`(?:${['lorem ipsum', 'dolor sit amet', 'consectetur adipiscing'].map(pyIgnoreCase).join('|')})(?!${PY_WORD})`, 'gu');
 // Python's [^\W\d_][\w'-]*: a word character that isn't a digit or "_", then word characters, ' and -.
 const WORD = new RegExp(`(?:(?!${PY_DIGIT}|_)${PY_WORD})${pyClass('alnum', "_'\\-")}*`, 'gu');
-const TRACKING_PARAM = new RegExp(`^(${pyCaseBlind('utm_')}|${pyCaseBlind('fbclid')}${PY_END}|${pyCaseBlind('gclid')}${PY_END}|${pyCaseBlind('msclkid')}${PY_END}|${pyCaseBlind('mc_')})`, 'iu');
+const TRACKING_PARAM = new RegExp(`^(${pyIgnoreCase('utm_')}|${pyIgnoreCase('fbclid')}${PY_END}|${pyIgnoreCase('gclid')}${PY_END}|${pyIgnoreCase('msclkid')}${PY_END}|${pyIgnoreCase('mc_')})`, 'u');
 const SPACES = new RegExp(`${PY_SPACE}+`, 'g');
-const CHARSET = new RegExp(`${pyCaseBlind('charset')}${PY_SPACE}*=${PY_SPACE}*['"]?([^;,'"${PY_SPACE_CHARS}]+)`, 'iu');
-const LD_JSON = new RegExp(pyCaseBlind('ld+json'), 'iu');
+const CHARSET = new RegExp(`${pyIgnoreCase('charset')}${PY_SPACE}*=${PY_SPACE}*['"]?([^;,'"${PY_SPACE_CHARS}]+)`, 'u');
+const LD_JSON = new RegExp(pyIgnoreCase('ld+json'), 'u');
 const LEADING_COMMENTS = new RegExp(`^(?:<!--[^]*?-->${PY_SPACE}*)+`);
 const CRAWLER_NAME = /^[a-z][a-z0-9_.-]*$/;
 const CONTROL = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g;
@@ -190,6 +192,14 @@ const UNSPACED_LANGS = ['zh', 'ja', 'th', 'lo', 'km', 'my'];
 // --- Small helpers ---------------------------------------------------------
 
 /** Length in characters as Python counts them (code points), not UTF-16 units. */
+/** For the parity tests (regexes.test.ts): _PLACEHOLDER_RE.search's span, in code points. */
+export function placeholderSpan(text: string): [number, number] | null {
+  const match = pySearchAfterNonWord(PLACEHOLDER, text);
+  if (!match) return null;
+  const start = charLength(text.slice(0, match.index));
+  return [start, start + charLength(match[0])];
+}
+
 export function charLength(text: string): number {
   let count = 0;
   for (const _ of text) count++;
@@ -677,7 +687,7 @@ export function runPageChecks(html: string, pageUrl: string, headers: HeaderMap 
   if (frames.length) add('uses-frames', `${frames.length} <frameset> or <frame> element(s)`, frames.length);
   const deprecated = pySorted(new Set(findAll(doc, DEPRECATED_TAGS).map((el) => el.name)));
   if (deprecated.length) add('deprecated-html-tags', deprecated.map((name) => `<${name}>`).join(', '), deprecated.length);
-  const placeholder = PLACEHOLDER.exec(visible);
+  const placeholder = pySearchAfterNonWord(PLACEHOLDER, visible);
   if (placeholder) {
     const startCp = charLength(visible.slice(0, placeholder.index));
     const endCp = startCp + charLength(placeholder[0]);

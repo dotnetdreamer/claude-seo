@@ -1,13 +1,13 @@
 ---
 name: osg-sync
-description: After this fork is synced with AgriciDaniel/claude-seo, bring osg/checks (the TypeScript copy of four Python scripts that Open Screenshot Generator runs) back in line with the scripts, and check osg/manifest.json still names files that exist. Use when asked to "sync osg", "update the osg checks" or after pulling upstream.
+description: After this fork is synced with AgriciDaniel/claude-seo, bring osg/checks (the TypeScript copy of six Python scripts that Open Screenshot Generator runs) back in line with the scripts, and check osg/manifest.json still names files that exist. Use when asked to "sync osg", "update the osg checks" or after pulling upstream.
 ---
 
 # Bring osg/ in line with upstream
 
-`osg/checks/` is a TypeScript version of four scripts. Upstream changes them
+`osg/checks/` is a TypeScript version of six scripts. Upstream changes them
 often. This skill finds what changed and makes the TypeScript match, proven
-by `osg/tests/parity.test.ts`.
+by the tests in `osg/tests/`.
 
 ## 1. Set up once
 
@@ -26,7 +26,7 @@ Find the last commit osg was checked against: the newest commit that touched
 
 ```bash
 last=$(git log -1 --format=%H -- osg/checks)
-git diff "$last"..HEAD -- scripts/page_checks.py scripts/agentic_check.py scripts/content_quality.py scripts/metadata_template.py
+git diff "$last"..HEAD -- scripts/page_checks.py scripts/agentic_check.py scripts/content_quality.py scripts/metadata_template.py scripts/url_safety.py scripts/sitemap_discovery.py
 ```
 
 Read the diff. For each change, note whether it moves a threshold, a message,
@@ -42,12 +42,17 @@ OSG_PARITY_PYTHON=.venv/bin/python node --test osg/tests/*.test.ts
 If upstream raised its lxml, libxml2, BeautifulSoup or Python version, write
 the tables again first: `make_entities.py`, `make_pyunicode.py`,
 `make_codecs.py`, and `make_libxml.py` with the `HTMLparser.c` of the libxml2
-lxml bundles (the script says where to get it). Then run the tests with
-larger counts once, for example `FUZZ_PAGES=20000 FUZZ_TREES=20000`.
+lxml bundles (the script says where to get it). `checks/xml.ts` follows
+libxml2's `parser.c`, `parserInternals.c` and `uri.c` of that version too
+(namespace checks, which errors stop it and which it records, the URI
+parse), so read their diff and match it. Then run the tests with larger
+counts once, for example `FUZZ_PAGES=20000 FUZZ_TREES=20000 FUZZ_XML=40000
+FUZZ_SITEMAPS=20000`.
 
 In the TypeScript, never use JavaScript's own trim, `\s`, `\w`, `\d`, `\b`,
 `\p{...}`, `toLowerCase()`, `sort()` or `.length` on text where the script uses
-Python's: use `checks/py.ts`.
+Python's: use `checks/py.ts`. Never write a lookbehind or use the `i` flag
+(`osg/README.md` says why; `tests/webkit.test.ts` fails on either).
 A failure names the page or file and shows the difference. Change the
 matching file in `osg/checks/` until the tests pass. Keep the TypeScript
 close to the Python line by line, so the next diff is easy to follow.

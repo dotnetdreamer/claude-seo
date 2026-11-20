@@ -10,7 +10,7 @@
 // from Python on bytes their tables don't share (see osg/README.md).
 
 import { CODEC_ALIASES, CODEC_MODULES, CODEC_TABLES } from './codecs.ts';
-import { PY_SPACE, PY_SPACE_CHARS, pyCaseBlind, pyRstrip, pyStrip } from './py.ts';
+import { PY_SPACE, PY_SPACE_CHARS, pyIgnoreCase, pyRstrip, pyStrip } from './py.ts';
 
 const has = (record: object, key: string) => Object.prototype.hasOwnProperty.call(record, key);
 
@@ -121,7 +121,7 @@ export function decodeAs(raw: Uint8Array, label: string): string {
   return codec ? decodeWith(raw, codec) : utf8(raw);
 }
 
-const CONTENT_TYPE_CHARSET = new RegExp(`${pyCaseBlind('charset')}${PY_SPACE}*=${PY_SPACE}*['"]?([^;,'"${PY_SPACE_CHARS}>]+)`, 'iu');
+const CONTENT_TYPE_CHARSET = new RegExp(`${pyIgnoreCase('charset')}${PY_SPACE}*=${PY_SPACE}*['"]?([^;,'"${PY_SPACE_CHARS}>]+)`, 'u');
 
 /** _extract_charset_from_content_type: the charset a Content-Type value names, or null. */
 export function charsetFromContentType(contentType: string): string | null {
@@ -131,8 +131,9 @@ export function charsetFromContentType(contentType: string): string | null {
 
 // The prescan runs on the first 4096 bytes read as ASCII (other bytes dropped),
 // so its patterns only ever see ASCII, and Python's \s there includes U+001C to U+001F.
-const META_TAG = /<meta\b([^>]*)>/gi;
-const META_ATTRIBUTE = new RegExp(`([^${PY_SPACE_CHARS}=/>]+)(?:${PY_SPACE}*=${PY_SPACE}*(?:"([^"]*)"|'([^']*)'|([^${PY_SPACE_CHARS}>]+)))?`, 'gi');
+// On ASCII, re.I is each letter and its other case, written out (no i flag, py.ts).
+const META_TAG = /<[mM][eE][tT][aA]\b([^>]*)>/g;
+const META_ATTRIBUTE = new RegExp(`([^${PY_SPACE_CHARS}=/>]+)(?:${PY_SPACE}*=${PY_SPACE}*(?:"([^"]*)"|'([^']*)'|([^${PY_SPACE_CHARS}>]+)))?`, 'g');
 
 /**
  * _extract_meta_charset: the encoding a <meta> in the first 4096 bytes

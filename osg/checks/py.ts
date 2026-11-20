@@ -110,14 +110,81 @@ export const PY_NOT_WORD = pyClass('alnum', '_', true);
 export const WORD_CHAR = PY_WORD;
 /** Python's \d in a str pattern: a decimal digit of any script (u flag). */
 export const PY_DIGIT = pyClass('decimal');
-/** Python's \b in a str pattern (u flag): its \w on one side and not the other. */
-export const PY_BOUNDARY = `(?:(?<=${PY_WORD})(?!${PY_WORD})|(?<!${PY_WORD})(?=${PY_WORD}))`;
 
 const cp = (ch: string) => ch.codePointAt(0) ?? 0;
 export const pyIsSpace = (ch: string) => inTable('space', cp(ch));
 export const pyIsAlnum = (ch: string) => inTable('alnum', cp(ch));
 export const pyIsAlpha = (ch: string) => inTable('alpha', cp(ch));
 export const pyIsPrintable = (ch: string) => inTable('printable', cp(ch));
+
+// --- Python's \b and "no \w just before", without a lookbehind ---------------
+//
+// No pattern in these checks has a lookbehind: WebKit before Safari 16.4
+// can't parse one, and the newest WebKit macOS 10.15 runs is Safari 15.6. A
+// pattern compiled at the top of a module would stop the whole app loading
+// there. What a lookbehind looked at, the character before a match, is
+// looked at here in code.
+
+/** Python's \w in a str pattern: str.isalnum(), or "_". */
+export const pyIsWord = (ch: string) => ch === '_' || pyIsAlnum(ch);
+
+/** The code point that ends at `index` (a UTF-16 index), or '' at the start. */
+function codePointBefore(text: string, index: number): string {
+  if (index <= 0) return '';
+  const low = text.charCodeAt(index - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return text.slice(index - 2, index);
+  }
+  return text[index - 1];
+}
+
+/** Whether the character just before `index` is one of Python's \w. False at the start. */
+export function pyWordBefore(text: string, index: number): boolean {
+  const ch = codePointBefore(text, index);
+  return ch !== '' && pyIsWord(ch);
+}
+
+/** Whether the character at `index` is one of Python's \w. False at the end. */
+export function pyWordAt(text: string, index: number): boolean {
+  const point = text.codePointAt(index);
+  return point !== undefined && pyIsWord(String.fromCodePoint(point));
+}
+
+/** Python's \b at `index`: one of its \w on one side and not on the other. */
+export function pyBoundaryAt(text: string, index: number): boolean {
+  return pyWordBefore(text, index) !== pyWordAt(text, index);
+}
+
+/**
+ * Python's finditer for a pattern that begins with a lookbehind for no \w, or
+ * with \b just before one of its \w: `pattern` is the rest of it (flags g and u), and a
+ * match counts only where the character before it isn't one of Python's \w.
+ * Whether that holds depends on where a match starts and nothing else, so a
+ * start that fails it is skipped as a whole, as Python's search skips it.
+ */
+export function* pyMatchesAfterNonWord(pattern: RegExp, text: string): Generator<RegExpExecArray> {
+  if (!pattern.global || !pattern.unicode) throw new Error('pyMatchesAfterNonWord needs the g and u flags');
+  pattern.lastIndex = 0;
+  for (;;) {
+    const match = pattern.exec(text);
+    if (!match) return;
+    if (!match[0]) throw new Error('pyMatchesAfterNonWord: the pattern matched an empty string');
+    if (pyWordBefore(text, match.index)) {
+      pattern.lastIndex = match.index + ((text.codePointAt(match.index) ?? 0) > 0xffff ? 2 : 1);
+      continue;
+    }
+    const end = pattern.lastIndex;
+    yield match;
+    pattern.lastIndex = end;
+  }
+}
+
+/** Python's search for the same kind of pattern: the first of pyMatchesAfterNonWord's matches, or null. */
+export function pySearchAfterNonWord(pattern: RegExp, text: string): RegExpExecArray | null {
+  for (const match of pyMatchesAfterNonWord(pattern, text)) return match;
+  return null;
+}
 
 const SPACE_RUN = new RegExp(`${PY_SPACE}+`);
 const LEADING = new RegExp(`^${PY_SPACE}+`);
@@ -216,13 +283,63 @@ export function pyCompare(a: string, b: string): number {
   return x.length - y.length;
 }
 
+// --- Python's re.I, without JavaScript's i flag ------------------------------
+//
+// JavaScript's i flag widens every class by case as well: under it the class
+// for Python's \w also takes U+0345 and four letters of Unicode 16, which
+// Python's \w leaves out (re.I never changes \w, \s or \d). So no pattern
+// here has the i flag; each ASCII letter is written out with what re.I lets
+// it match, measured over every code point (tests/generated.test.ts).
+
+const IGNORE_CASE_EXTRA: Record<string, string> = { i: '\\u0130\\u0131', k: '\\u212a', s: '\\u017f' };
+
 /**
- * A literal for a case-blind pattern (flags iu), read the way Python's re.I
- * reads it: there "i" also matches dotless U+0131 and U+0130 ("I" with a
- * dot). The u flag already folds U+017F to "s" and U+212A to "k", as Python does.
+ * A pattern source made case-blind the way Python's re.I reads it, for a
+ * pattern compiled without the i flag. Escapes, classes and group names stay
+ * as they are, so a class in it must be one of this file's (\w, \s, \d),
+ * which re.I leaves alone; an ASCII letter in a class, or a cased letter
+ * past ASCII anywhere, is refused, as re.I would read those its own way.
  */
-export function pyCaseBlind(literal: string): string {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/i/g, '[i\\u0131\\u0130]');
+export function pyIgnoreCaseSource(source: string): string {
+  let out = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '\\') {
+      const next = source[i + 1] ?? '';
+      let end = i + 2;
+      if ((next === 'u' || next === 'p' || next === 'P') && source[i + 2] === '{') end = source.indexOf('}', i) + 1;
+      else if (next === 'u') end = i + 6;
+      else if (next === 'x') end = i + 4;
+      else if (next === 'k' && source[i + 2] === '<') end = source.indexOf('>', i) + 1;
+      else if (next === 'c') end = i + 3;
+      out += source.slice(i, end);
+      i = end - 1;
+    } else if (ch === '[') {
+      let end = i + 1;
+      while (end < source.length && source[end] !== ']') end += source[end] === '\\' ? 2 : 1;
+      const body = source.slice(i, end + 1);
+      if (/[A-Za-z]/.test(body.replace(/\\(u\{[^}]*\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)/g, ''))) throw new Error(`pyIgnoreCaseSource: a class with a letter in it reads differently under re.I: ${body}`);
+      out += body;
+      i = end;
+    } else if (ch === '(' && source[i + 1] === '?' && source[i + 2] === '<' && source[i + 3] !== '=' && source[i + 3] !== '!') {
+      const end = source.indexOf('>', i) + 1;
+      out += source.slice(i, end);
+      i = end - 1;
+    } else if (/[A-Za-z]/.test(ch)) {
+      const lower = ch.toLowerCase();
+      out += `[${lower}${lower.toUpperCase()}${IGNORE_CASE_EXTRA[lower] ?? ''}]`;
+    } else {
+      const point = source.codePointAt(i) ?? 0;
+      if (point > 0x7f && inTable('cased', point)) throw new Error(`pyIgnoreCaseSource: ${String.fromCodePoint(point)} has a case of its own under re.I`);
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** A literal, escaped and made case-blind the way Python's re.I reads it (pyIgnoreCaseSource). */
+export function pyIgnoreCase(literal: string): string {
+  return pyIgnoreCaseSource(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
 
 /** Python's $ without MULTILINE: the end, or just before a newline that ends the text. */
@@ -235,8 +352,13 @@ export function pyLen(text: string): number {
   return count;
 }
 
-/** Where Python's ^ matches under re.M: the start, or just after "\n" (not after "\r" or U+2028 as JavaScript's m flag has it). */
-export const PY_LINE_START = '(?<![^\\n])';
+/**
+ * Python's ^ under re.M, for a test() that only asks whether there's a match:
+ * the start, or just after "\n" (not after "\r" or U+2028 as JavaScript's m
+ * flag has it). The "\n" is part of the match, so the match itself, where it
+ * starts and what it holds, isn't Python's.
+ */
+export const PY_LINE_START_TEST = '(?:^|\\n)';
 /** Python's . without re.S: any character but "\n" (JavaScript's also stops at "\r", U+2028 and U+2029). */
 export const PY_DOT = '[^\\n]';
 /** Python's [^\S\n]: whitespace that isn't "\n". */

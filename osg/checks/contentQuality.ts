@@ -5,7 +5,7 @@
 // The AI-pattern phrases come from the Wikipedia "AI Cleanup" project's
 // catalogue of LLM-typical phrasing (CC BY-SA 4.0), as the script cites.
 
-import { PY_DIGIT, PY_SPACE, PY_WORD, pyClass, pyLower, pyRound, pyRoundInt, pyStrip, WORD_CHAR } from './py.ts';
+import { PY_DIGIT, PY_SPACE, PY_WORD, pyClass, pyLower, pyMatchesAfterNonWord, pyRound, pyRoundInt, pyStrip, WORD_CHAR } from './py.ts';
 
 export const FILLER_PHRASES = [
   "it's important to note that",
@@ -101,9 +101,12 @@ const TOKEN = new RegExp(
   'gu',
 );
 const W = WORD_CHAR;
-const BOUNDARY = `(?:(?<=${W})(?!${W})|(?<!${W})(?=${W}))`;
-const NUMBER = new RegExp(`${BOUNDARY}${PY_DIGIT}+(?:[.,]${PY_DIGIT}+)?(?:%|st|nd|rd|th)?${BOUNDARY}`, 'gu');
-const ENTITY = new RegExp(`${BOUNDARY}(?:[A-Z][a-z]+(?:${PY_SPACE}+[A-Z][a-z]+)+)${BOUNDARY}`, 'gu');
+// _NUMBER_RE and _ENTITY_RE, \b...\b. Each starts with one of Python's \w, so
+// the \b before it is no \w just before (countAfterNonWord). The \b after it
+// depends on what the match ends with: after a \w, no \w next; after "%",
+// a \w next. The order Python tries them in is kept: "%", st, nd, rd, th, none.
+const NUMBER = new RegExp(`${PY_DIGIT}+(?:[.,]${PY_DIGIT}+)?(?:%(?=${W})|(?:st|nd|rd|th)(?!${W})|(?!${W}))`, 'gu');
+const ENTITY = new RegExp(`[A-Z][a-z]+(?:${PY_SPACE}+[A-Z][a-z]+)+(?!${W})`, 'gu');
 /** Python's [^\W\d_]: a word character that isn't a digit or "_". */
 const PY_ALPHA = `(?:(?!${PY_DIGIT}|_)${PY_WORD})`;
 const CJK_CHAR = /[\uac00-\ud7a3\u3041-\u3096\u30a1-\u30fa\u30fc\u3400-\u4dbf\u4e00-\u9fff]/gu;
@@ -120,15 +123,22 @@ function escapeRegExp(text: string): string {
 }
 
 const phraseCache = new Map<string, RegExp>();
-function phraseHits(text: string, patterns: readonly string[]): string[] {
+/** For the parity tests (regexes.test.ts): _NUMBER_RE.findall and _ENTITY_RE.findall. */
+export function numberAndEntityMatches(text: string): [string[], string[]] {
+  return [Array.from(pyMatchesAfterNonWord(NUMBER, text), (match) => match[0]), Array.from(pyMatchesAfterNonWord(ENTITY, text), (match) => match[0])];
+}
+
+/** _phrase_hits. Exported for the parity tests (regexes.test.ts). */
+export function phraseHits(text: string, patterns: readonly string[]): string[] {
   const lowered = pyLower(text);
   return patterns.filter((pattern) => {
     let regex = phraseCache.get(pattern);
     if (!regex) {
-      regex = new RegExp(`(?<!${W})${escapeRegExp(pattern)}(?!${W})`, 'u');
+      // The script's phrase with no \w before it and none after: the start is looked at in code (py.ts, pyMatchesAfterNonWord).
+      regex = new RegExp(`${escapeRegExp(pattern)}(?!${W})`, 'gu');
       phraseCache.set(pattern, regex);
     }
-    return regex.test(lowered);
+    return !pyMatchesAfterNonWord(regex, lowered).next().done;
   });
 }
 
@@ -146,6 +156,13 @@ function repetition(tokens: string[]): number {
 
 function count(text: string, regex: RegExp): number {
   return text.match(regex)?.length ?? 0;
+}
+
+/** len(re.findall(...)) for a pattern that starts with \b before a \w (pyMatchesAfterNonWord). */
+function countAfterNonWord(text: string, regex: RegExp): number {
+  let found = 0;
+  for (const _ of pyMatchesAfterNonWord(regex, text)) found++;
+  return found;
 }
 
 function detectScript(text: string): 'cjk' | 'unsegmented' | 'non_latin_alphabetic' | null {
@@ -194,8 +211,8 @@ export function analyseText(text: string): ContentQuality {
   const unique = new Set(tokens).size;
   const filler = phraseHits(text, FILLER_PHRASES);
   const ai = phraseHits(text, AI_PATTERNS);
-  const entities = count(text, ENTITY);
-  const numbers = count(text, NUMBER);
+  const entities = countAfterNonWord(text, ENTITY);
+  const numbers = countAfterNonWord(text, NUMBER);
   const densityPer100 = ((entities + numbers) * 100) / Math.max(1, n);
   const density = Math.min(1, densityPer100 / 10);
   const repetitionScore = pyRoundInt(repetition(tokens) * 100);

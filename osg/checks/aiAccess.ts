@@ -4,7 +4,7 @@
 // "server-rendered" check. The agent list and its roles are the script's.
 
 import { parseHtml, textOf, without } from './html.ts';
-import { PY_SPACE, pyCaseBlind, pyIsSpace, pyLen, pyLower, pySplit, pyStrip } from './py.ts';
+import { PY_SPACE, pyIgnoreCase, pyIsSpace, pyLen, pyLower, pySplit, pyStrip } from './py.ts';
 
 export type AgentRole = 'training' | 'search' | 'user' | 'control' | 'ads';
 
@@ -231,11 +231,11 @@ export function wordsWithoutJavaScript(html: string): number {
   return pySplit(text).length;
 }
 
-// The script's patterns, with re.I as Python reads it (py.ts, pyCaseBlind).
-const SHELL_PHRASE = new RegExp(pyCaseBlind('enable javascript'), 'iu');
-const SHELL_DIV = new RegExp(pyCaseBlind('<div'), 'giu');
-const SHELL_ID = new RegExp(`${pyCaseBlind('id=')}["'](${['root', 'app', '__next', '__nuxt'].map(pyCaseBlind).join('|')})["']`, 'iu');
-const SHELL_END = new RegExp(`^${pyCaseBlind('</div>')}`, 'iu');
+// The script's patterns, with re.I as Python reads it (py.ts, pyIgnoreCase).
+const SHELL_PHRASE = new RegExp(pyIgnoreCase('enable javascript'), 'u');
+const SHELL_DIV = new RegExp(pyIgnoreCase('<div'), 'gu');
+const SHELL_ID = new RegExp(`${pyIgnoreCase('id=')}["'](${['root', 'app', '__next', '__nuxt'].map(pyIgnoreCase).join('|')})["']`, 'u');
+const SHELL_END = new RegExp(`^${pyIgnoreCase('</div>')}`, 'u');
 
 /** Whether the raw HTML looks like an app shell that fills itself in with JavaScript. */
 export function jsShellMarker(html: string): boolean {

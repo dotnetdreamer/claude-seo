@@ -3,7 +3,7 @@
 // standard, and Google Search ignores the file; Lighthouse checks it.
 
 import { charLength } from './pageChecks.ts';
-import { PY_DOT, PY_LINE_START, PY_NOT_SPACE, PY_SPACE, PY_SPACE_NOT_NEWLINE, pyLstrip, pySplitLines, pyStrip } from './py.ts';
+import { PY_DOT, PY_LINE_START_TEST, PY_NOT_SPACE, PY_SPACE, PY_SPACE_NOT_NEWLINE, pyIgnoreCase, pyLstrip, pySplitLines, pyStrip } from './py.ts';
 
 export interface LlmsVerdict {
   lighthouse: 'pass' | 'fail' | 'not-applicable';
@@ -12,10 +12,11 @@ export interface LlmsVerdict {
 }
 
 // The script's patterns with re.M, in Python's terms: ^ after "\n" only, . up to "\n", its whitespace.
-const H1 = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*#${PY_SPACE}+${PY_DOT}+`);
-const SUMMARY = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*>${PY_SPACE}+${PY_NOT_SPACE}`);
-const H2 = new RegExp(`${PY_LINE_START}${PY_SPACE_NOT_NEWLINE}*##${PY_SPACE}+${PY_NOT_SPACE}`);
-const SOFT_404 = new RegExp(`^${PY_SPACE}*<(!doctype|html)`, 'i');
+// They're only ever test()ed, so the ^ may take the "\n" (py.ts, PY_LINE_START_TEST).
+const H1 = new RegExp(`${PY_LINE_START_TEST}${PY_SPACE_NOT_NEWLINE}*#${PY_SPACE}+${PY_DOT}+`);
+const SUMMARY = new RegExp(`${PY_LINE_START_TEST}${PY_SPACE_NOT_NEWLINE}*>${PY_SPACE}+${PY_NOT_SPACE}`);
+const H2 = new RegExp(`${PY_LINE_START_TEST}${PY_SPACE_NOT_NEWLINE}*##${PY_SPACE}+${PY_NOT_SPACE}`);
+const SOFT_404 = new RegExp(`^${PY_SPACE}*<(${pyIgnoreCase('!doctype')}|${pyIgnoreCase('html')})`);
 
 /** The same answer as /\[.+\]\(.+\)/ in one pass per line. */
 function hasMarkdownLink(content: string): boolean {
@@ -27,6 +28,11 @@ function hasMarkdownLink(content: string): boolean {
     if (middle >= 0 && line.indexOf(')', middle + 3) >= 0) return true;
   }
   return false;
+}
+
+/** For the parity tests (regexes.test.ts): what _LLMS_LH_H1, _SUMMARY and _H2 find. */
+export function llmsLineTests(text: string): [boolean, boolean, boolean] {
+  return [H1.test(text), SUMMARY.test(text), H2.test(text)];
 }
 
 export function lighthouseLlmsTxt(status: number | null, content: string | null): LlmsVerdict {
