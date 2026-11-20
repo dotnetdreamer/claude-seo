@@ -14,25 +14,18 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { MAX_SITEMAP_BYTES, readSitemapBody, type SitemapBody } from '../checks/sitemap.ts';
 import { AT, XML, madeUpCases, member, utf8, writtenCases, type Case } from './sitemapCases.ts';
+import { callPython } from './python.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const python = process.env.OSG_PARITY_PYTHON || 'python3';
 
 function harness(name: string, payload: unknown): any {
-  const result = spawnSync(python, ['-I', path.join(here, 'harness.py'), name], {
-    cwd: repo,
-    input: JSON.stringify(payload),
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
+  const result = callPython([path.join(here, 'harness.py'), name], JSON.stringify(payload), repo);
   if (result.status !== 0) throw new Error(`harness ${name} failed (${result.status}):\n${result.stderr}`);
   return JSON.parse(result.stdout);
 }

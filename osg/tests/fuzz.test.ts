@@ -12,7 +12,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,21 +20,15 @@ import { auditRobotsText } from '../checks/aiAccess.ts';
 import { lighthouseLlmsTxt } from '../checks/llms.ts';
 import { analyseText } from '../checks/contentQuality.ts';
 import { analyseMetadata, analyseMetadataPairs } from '../checks/metadataTemplate.ts';
+import { callPython } from './python.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const python = process.env.OSG_PARITY_PYTHON || 'python3';
 const PAGES = Number(process.env.FUZZ_PAGES ?? 3000);
 const TEXTS = Number(process.env.FUZZ_TEXTS ?? 3000);
 
 function harness(name: string, payload: unknown): any {
-  const result = spawnSync(python, ['-I', path.join(here, 'harness.py'), name], {
-    cwd: repo,
-    input: JSON.stringify(payload),
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
+  const result = callPython([path.join(here, 'harness.py'), name], JSON.stringify(payload), repo);
   if (result.status !== 0) throw new Error(`harness ${name} failed (${result.status}):\n${result.stderr.slice(-4000)}`);
   return JSON.parse(result.stdout);
 }

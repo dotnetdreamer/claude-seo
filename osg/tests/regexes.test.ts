@@ -11,7 +11,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,19 +19,13 @@ import { AI_PATTERNS, FILLER_PHRASES, numberAndEntityMatches, phraseHits } from 
 import { llmsLineTests } from '../checks/llms.ts';
 import { ctaTail } from '../checks/metadataTemplate.ts';
 import { pyIgnoreCase } from '../checks/py.ts';
+import { callPython } from './python.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const python = process.env.OSG_PARITY_PYTHON || 'python3';
 
 function harness(name: string, payload: unknown): any {
-  const result = spawnSync(python, ['-I', path.join(here, 'harness.py'), name], {
-    cwd: repo,
-    input: JSON.stringify(payload),
-    encoding: 'utf8',
-    maxBuffer: 512 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
+  const result = callPython([path.join(here, 'harness.py'), name], JSON.stringify(payload), repo);
   if (result.status !== 0) throw new Error(`harness ${name} failed (${result.status}):\n${result.stderr}`);
   return JSON.parse(result.stdout);
 }

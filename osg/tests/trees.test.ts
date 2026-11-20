@@ -11,22 +11,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isListAttribute, parseHtml, type HtmlElement } from '../checks/html.ts';
 import { pySplit } from '../checks/py.ts';
+import { callPython } from './python.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const python = process.env.OSG_PARITY_PYTHON || 'python3';
 const TREES = Number(process.env.FUZZ_TREES ?? 4000);
 
 function harness(name: string, payload: unknown): any {
-  const result = spawnSync(python, ['-I', path.join(here, 'harness.py'), name], { cwd: repo, input: JSON.stringify(payload), encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 });
-  if (result.error) throw result.error;
+  const result = callPython([path.join(here, 'harness.py'), name], JSON.stringify(payload), repo);
   if (result.status !== 0) throw new Error(`harness ${name} failed (${result.status}):\n${result.stderr.slice(-4000)}`);
   return JSON.parse(result.stdout);
 }

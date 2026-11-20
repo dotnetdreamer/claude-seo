@@ -8,7 +8,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,14 +17,13 @@ import { auditRobotsText, AI_AGENTS } from '../checks/aiAccess.ts';
 import { lighthouseLlmsTxt } from '../checks/llms.ts';
 import { analyseText } from '../checks/contentQuality.ts';
 import { analyseMetadata, analyseMetadataPairs } from '../checks/metadataTemplate.ts';
+import { callPython } from './python.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
-const python = process.env.OSG_PARITY_PYTHON || 'python3';
 
 function runPython(args: string[], input?: string): string {
-  const result = spawnSync(python, ['-I', ...args], { cwd: repo, input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  if (result.error) throw result.error;
+  const result = callPython(args, input ?? '', repo);
   if (result.status !== 0) throw new Error(`python ${args.join(' ')} failed (${result.status}):\n${result.stderr}\n${result.stdout}`);
   return result.stdout;
 }
